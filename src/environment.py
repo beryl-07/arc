@@ -6,6 +6,7 @@ import glob
 import os
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 from .config import PipelineConfig
@@ -51,6 +52,11 @@ def ensure_medrag_repo(config: PipelineConfig) -> Path:
     return config.medrag_repo_dir
 
 
+def is_statpearls_ready(config: PipelineConfig) -> bool:
+    chunk_dir = config.db_dir / "statpearls" / "chunk"
+    return bool(glob.glob(str(chunk_dir / "*.jsonl")))
+
+
 def prepare_runtime(config: PipelineConfig, mount_drive: bool = False) -> None:
     if mount_drive:
         mount_google_drive(config)
@@ -92,7 +98,21 @@ def prepare_statpearls(config: PipelineConfig) -> None:
         script = config.medrag_repo_dir / "src" / "data" / "statpearls.py"
         if not script.exists():
             raise RuntimeError(f"Missing MedRAG StatPearls script: {script}")
-        subprocess.run(["python", str(script)], cwd=str(config.root_dir), check=True)
+        result = subprocess.run(
+            [sys.executable, str(script)],
+            cwd=str(config.root_dir),
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(
+                "MedRAG StatPearls chunking failed.\n"
+                f"Command: {sys.executable} {script}\n"
+                f"Working directory: {config.root_dir}\n"
+                f"STDOUT:\n{result.stdout}\n"
+                f"STDERR:\n{result.stderr}"
+            )
 
     n_chunks = len(glob.glob(str(chunk_dir / "*.jsonl")))
     if n_chunks == 0:

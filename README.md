@@ -94,7 +94,7 @@ ${ROOT_DIR}/outputs/phase1_scenarios_10q.jsonl
 Run the MMLU-Med variant:
 
 ```bash
-python -m src.cli --dataset mmlu-med --n-questions 10 --output mmlu_med_scenarios.jsonl
+python -m src.cli --prepare-statpearls --dataset mmlu-med --n-questions 10 --output mmlu_med_scenarios.jsonl
 ```
 
 In Colab, add `--mount-drive` if you want the runner to mount Google Drive:
@@ -103,7 +103,9 @@ In Colab, add `--mount-drive` if you want the runner to mount Google Drive:
 python -m src.cli --mount-drive --dataset pubmedqa --n-questions 10
 ```
 
-If BM25 over StatPearls needs the notebook workaround, run with:
+If BM25 over StatPearls needs the notebook workaround, pass
+`--prepare-statpearls`. This runs MedRAG's StatPearls chunking script from the
+right working directory before retriever initialization:
 
 ```bash
 python -m src.cli --prepare-statpearls --dataset pubmedqa --n-questions 10

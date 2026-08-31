@@ -9,7 +9,7 @@ from pathlib import Path
 from types import ModuleType
 
 from .config import PipelineConfig
-from .environment import ensure_medrag_repo
+from .environment import ensure_medrag_repo, prepare_statpearls
 
 
 def _load_medrag_utils(repo_dir: Path) -> ModuleType:
@@ -40,6 +40,7 @@ class MedRAGRetrievalManager:
         self.medrag_utils = _load_medrag_utils(repo_dir)
         self._patch_dense_index_dir()
         self.systems: dict[str, object] = {}
+        self._prepared_dependencies: set[str] = set()
 
     @property
     def corpus_names(self) -> dict:
@@ -75,6 +76,7 @@ class MedRAGRetrievalManager:
 
     def init_retriever(self, retriever_key: str):
         print(f"\n=== Init {retriever_key} ===")
+        self._prepare_corpus_dependencies()
         start = time.time()
         system = self.medrag_utils.RetrievalSystem(
             retriever_name=retriever_key,
@@ -87,6 +89,15 @@ class MedRAGRetrievalManager:
         elapsed = (time.time() - start) / 60
         print(f"{retriever_key} ready in {elapsed:.1f} min.")
         return system
+
+    def _prepare_corpus_dependencies(self) -> None:
+        corpus_key = self.config.resolved_corpus_name
+        native_corpora = self.corpus_names.get(corpus_key, [corpus_key])
+        if "statpearls" not in native_corpora or "statpearls" in self._prepared_dependencies:
+            return
+        print("Preparing StatPearls corpus before MedRAG retriever initialization.")
+        prepare_statpearls(self.config)
+        self._prepared_dependencies.add("statpearls")
 
     def init_all(self) -> None:
         for retriever in self.config.retrievers:
