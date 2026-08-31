@@ -22,11 +22,20 @@ def mount_google_drive(config: PipelineConfig) -> None:
 
     if not config.use_drive:
         return
+    if Path("/content/drive/MyDrive").exists():
+        return
     try:
         from google.colab import drive  # type: ignore
     except ImportError:
         return
-    drive.mount("/content/drive")
+    try:
+        drive.mount("/content/drive")
+    except AttributeError as exc:
+        raise RuntimeError(
+            "Google Drive mounting must run inside a Colab notebook cell, not "
+            "inside a plain Python subprocess. Mount Drive in the notebook first "
+            "or run the CLI without --mount-drive after Drive is mounted."
+        ) from exc
 
 
 def ensure_medrag_repo(config: PipelineConfig) -> Path:
