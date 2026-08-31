@@ -1,0 +1,10 @@
+accelerate
+datasets
+faiss-cpu
+huggingface_hub
+pillow<12
+pyserini
+sentence-transformers
+torch
+tqdm
+transformers

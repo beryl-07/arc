@@ -1,0 +1,179 @@
+# ARC Phase 1 Conflict Pipeline
+
+This workspace turns the original notebook
+`phase1_conflict_pipeline (1).ipynb` into a reusable Python project for Phase 1
+of the methodology:
+
+1. retrieve biomedical contexts with MedRAG retrievers,
+2. estimate parametric knowledge through repeated LLM probes,
+3. normalize retrieved and parametric evidence into one source format,
+4. detect Inter-Context (IC), Context-Memory (CM), and Inter-Memory (IM)
+   conflicts with one agnostic NLI comparison path,
+5. write scenario records as JSONL.
+
+<p align="center">
+  <img src="./images/methodology.svg" width="98%" style="display: block; margin: 0 auto; background: #f0f0f0;"/>
+</p>
+
+## Project Layout
+
+```text
+.
++-- images/
+|   +-- methodology.svg
++-- requirements.txt
++-- src/
+    +-- cli.py              # command line runner
+    +-- config.py           # environment-driven settings
+    +-- conflicts.py        # agnostic IC, CM, and IM conflict detector
+    +-- datasets.py         # PubMedQA and MMLU-Med loaders
+    +-- environment.py      # Colab/MedRAG/StatPearls setup helpers
+    +-- nli.py              # NLI model wrapper
+    +-- pipeline.py         # end-to-end scenario builders
+    +-- pke.py              # parametric knowledge estimation
+    +-- retrieval.py        # MedRAG retrieval manager
+    +-- utils.py            # JSONL helpers
+```
+
+## Requirements
+
+The pipeline is designed for a Colab or GPU Linux environment. Dense retrieval,
+NLI, and PKE models can be memory intensive.
+
+System packages:
+
+```bash
+apt-get install -y openjdk-21-jdk-headless git git-lfs wget
+```
+
+Python packages:
+
+```bash
+pip install -r requirements.txt
+```
+
+## Configuration
+
+Defaults are defined in `.env` and can still be overridden by exported
+environment variables.
+
+Core variables:
+
+```bash
+USE_DRIVE=true
+DRIVE_ROOT=/content/drive/MyDrive/arc_phase1
+LOCAL_ROOT=/content/arc_phase1
+LOCAL_EMBED_DIR=/content/pubmed_embeddings
+HF_TOKEN=
+CORPUS_NAME=MedText
+TOP_K=3
+RETRIEVERS=BM25,Contriever,SPECTER,MedCPT
+DEFAULT_N_QUESTIONS=10
+NLI_MODEL=cross-encoder/nli-deberta-v3-small
+PKE_MODEL=Qwen/Qwen2.5-3B-Instruct
+N_PROBES=7
+```
+
+Do not hardcode Hugging Face tokens in source files. Use the standard CLI login
+or environment variables when a private or gated model requires authentication.
+
+## Run
+
+From the repository root:
+
+```bash
+python -m src.cli --dataset pubmedqa --n-questions 10
+```
+
+This writes:
+
+```text
+${ROOT_DIR}/outputs/phase1_scenarios_10q.jsonl
+```
+
+Run the MMLU-Med variant:
+
+```bash
+python -m src.cli --dataset mmlu-med --n-questions 10 --output mmlu_med_scenarios.jsonl
+```
+
+In Colab, add `--mount-drive` if you want the runner to mount Google Drive:
+
+```bash
+python -m src.cli --mount-drive --dataset pubmedqa --n-questions 10
+```
+
+If BM25 over StatPearls needs the notebook workaround, run with:
+
+```bash
+python -m src.cli --prepare-statpearls --dataset pubmedqa --n-questions 10
+```
+
+## Output Schema
+
+Each JSONL line is one scenario:
+
+```json
+{
+  "query_id": "string",
+  "query": "string",
+  "gold_answer": "string",
+  "conflicts": [
+    {
+      "conflict_id": "string",
+      "type": "IC",
+      "nli_label": "contradiction",
+      "nli_score": 0.91,
+      "conflictual_element": [
+        {
+          "source_type": "retrieved",
+          "rank": 1,
+          "score": 12.4,
+          "document_id": "string",
+          "title": "string",
+          "text": "string",
+          "source_corpus": "MedText",
+          "retriever": "BM25",
+          "content": null
+        }
+      ]
+    }
+  ],
+  "non_conflictual_elements": [
+    {
+      "source_type": "parametric",
+      "rank": 1,
+      "score": 0.0,
+      "document_id": "probe_1",
+      "title": "Parametric probe 1",
+      "text": "string",
+      "source_corpus": "parametric",
+      "retriever": "Qwen/Qwen2.5-3B-Instruct",
+      "content": null
+    }
+  ]
+}
+```
+
+Conflict types are inferred from the compared source elements:
+
+```text
+retrieved  + retrieved   -> IC
+retrieved  + parametric  -> CM
+parametric + parametric  -> IM
+```
+
+The `conflictual_element` list contains the two elements that contradicted each
+other. `non_conflictual_elements` contains every normalized element that was not
+part of any detected contradiction.
+
+## Notes
+
+- MedRAG is cloned automatically into `${ROOT_DIR}/MedRAG`.
+- Corpus data is stored under `${ROOT_DIR}/corpus`.
+- Outputs are stored under `${ROOT_DIR}/outputs`.
+- Dense retriever indexes are redirected to `${LOCAL_EMBED_DIR}` when MedRAG
+  tries to place them on Google Drive, matching the notebook's performance
+  workaround.
+- A placeholder `OPENAI_API_KEY` is set only to avoid an eager Pyserini/OpenAI
+  client initialization error. This pipeline does not call the OpenAI API.
