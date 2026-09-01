@@ -13,7 +13,15 @@ from .conflicts import (
     normalize_parametric_elements,
     normalize_retrieved_elements,
 )
-from .datasets import format_mmlu_mcq, load_mmlu_med, load_pubmedqa
+from .datasets import (
+    format_medmcqa_mcq,
+    format_medqa_us_mcq,
+    format_mmlu_mcq,
+    load_medmcqa,
+    load_medqa_us,
+    load_mmlu_med,
+    load_pubmedqa,
+)
 from .nli import NLIClassifier
 from .pke import ParametricKnowledgeEstimator
 from .retrieval import MedRAGRetrievalManager
@@ -83,6 +91,26 @@ class ConflictPipeline:
             self._iter_mmlu_med(dataset, n_questions),
         )
 
+    def run_medqa_us(
+        self, n_questions: int, output_filename: str, split: str = "test"
+    ) -> tuple[Path, dict]:
+        LOG.info("MedQA-US run started: split=%s n_questions=%s", split, n_questions)
+        dataset = load_medqa_us(split=split)
+        return self._write_scenarios(
+            self.config.output_dir / output_filename,
+            self._iter_medqa_us(dataset, n_questions),
+        )
+
+    def run_medmcqa(
+        self, n_questions: int, output_filename: str, split: str = "validation"
+    ) -> tuple[Path, dict]:
+        LOG.info("MedMCQA run started: split=%s n_questions=%s", split, n_questions)
+        dataset = load_medmcqa(split=split)
+        return self._write_scenarios(
+            self.config.output_dir / output_filename,
+            self._iter_medmcqa(dataset, n_questions),
+        )
+
     def _iter_pubmedqa(self, dataset, n_questions: int):
         limit = min(n_questions, len(dataset))
         for idx in range(limit):
@@ -106,6 +134,42 @@ class ConflictPipeline:
                 limit,
                 query_id,
                 gold_letter,
+                row["question"][:100],
+            )
+            yield self._process_query(query_id, query, gold_answer)
+
+    def _iter_medqa_us(self, dataset, n_questions: int):
+        limit = min(n_questions, len(dataset))
+        for idx in range(limit):
+            row = dataset[idx]
+            query, options, gold_letter = format_medqa_us_mcq(row)
+            query_id = f"medqa_us_{idx}"
+            gold_answer = options[gold_letter]
+            LOG.info(
+                "MedQA-US question %s/%s: query_id=%s gold=%s preview=%r",
+                idx + 1,
+                limit,
+                query_id,
+                gold_letter,
+                row["question"][:100],
+            )
+            yield self._process_query(query_id, query, gold_answer)
+
+    def _iter_medmcqa(self, dataset, n_questions: int):
+        limit = min(n_questions, len(dataset))
+        for idx in range(limit):
+            row = dataset[idx]
+            query, options, gold_letter = format_medmcqa_mcq(row)
+            row_id = row.get("id", str(idx))
+            query_id = f"medmcqa_{row_id}"
+            gold_answer = options[gold_letter]
+            LOG.info(
+                "MedMCQA question %s/%s: query_id=%s gold=%s subject=%s preview=%r",
+                idx + 1,
+                limit,
+                query_id,
+                gold_letter,
+                row.get("subject_name", ""),
                 row["question"][:100],
             )
             yield self._process_query(query_id, query, gold_answer)

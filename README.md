@@ -26,13 +26,20 @@ of the methodology:
     +-- cli.py              # command line runner
     +-- config.py           # environment-driven settings
     +-- conflicts.py        # agnostic IC, CM, and IM conflict detector
-    +-- datasets.py         # PubMedQA and MMLU-Med loaders
+    +-- datasets.py         # PubMedQA, MMLU-Med, MedQA-US, MedMCQA loaders
     +-- environment.py      # Colab/MedRAG/StatPearls setup helpers
     +-- nli.py              # NLI model wrapper
     +-- pipeline.py         # end-to-end scenario builders
     +-- pke.py              # parametric knowledge estimation
     +-- retrieval.py        # MedRAG retrieval manager
     +-- utils.py            # JSONL helpers
+```
+
+```text
++-- notebooks/
+    +-- run_mmlu_med_from_gitlab.ipynb
+    +-- run_medqa_us_from_gitlab.ipynb
+    +-- run_medmcqa_from_gitlab.ipynb
 ```
 
 ## Requirements
@@ -95,6 +102,18 @@ Run the MMLU-Med variant:
 
 ```bash
 python -m src.cli --prepare-statpearls --dataset mmlu-med --n-questions 10 --output mmlu_med_scenarios.jsonl
+```
+
+Run MedQA-US (USMLE 4-option):
+
+```bash
+python -m src.cli --prepare-statpearls --dataset medqa-us --n-questions 10 --output medqa_us_scenarios.jsonl
+```
+
+Run MedMCQA (default split: `validation`, as `test` labels are private):
+
+```bash
+python -m src.cli --prepare-statpearls --dataset medmcqa --split validation --n-questions 10 --output medmcqa_scenarios.jsonl
 ```
 
 In Colab, add `--mount-drive` if you want the runner to mount Google Drive:
