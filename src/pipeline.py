@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from typing import Generator, Iterator
 
 from .config import PipelineConfig
 from .conflicts import (
@@ -29,6 +30,66 @@ from .retrieval import MedRAGRetrievalManager
 
 LOG = logging.getLogger(__name__)
 
+# Type alias for raw question tuples yielded by _iter_* methods.
+# Using _process_query only on questions that still need to be processed
+# means no GPU work is done for already-completed questions during resume.
+_RawQuestion = tuple[str, str, str]  # (query_id, query, gold_answer)
+
+
+# ---------------------------------------------------------------------------
+# Resume helper
+# ---------------------------------------------------------------------------
+
+def read_last_query_id(output_path: Path) -> str | None:
+    """Return the ``query_id`` of the last line written to *output_path*.
+
+    Returns ``None`` when the file does not exist or is empty.
+    This is the only piece of state needed to resume an interrupted run:
+    skip all questions up to and including this id, then continue from the
+    next one in append mode.
+    """
+    if not output_path.exists() or output_path.stat().st_size == 0:
+        return None
+    try:
+        with output_path.open("rb") as fh:
+            # Seek to the last non-empty line efficiently without reading
+            # the whole file (important for large JSONL outputs).
+            fh.seek(0, 2)           # end of file
+            pos = fh.tell()
+            if pos == 0:
+                return None
+            # Walk backward to find the last newline before the final one.
+            fh.seek(max(0, pos - 1))
+            if fh.read(1) == b"\n":
+                pos -= 1            # skip trailing newline
+            # Now find the start of that last line.
+            chunk_size = 4096
+            while pos > 0:
+                read_start = max(0, pos - chunk_size)
+                fh.seek(read_start)
+                chunk = fh.read(pos - read_start)
+                nl = chunk.rfind(b"\n")
+                if nl != -1:
+                    last_line_bytes = chunk[nl + 1 :]
+                    break
+                pos = read_start
+            else:
+                fh.seek(0)
+                last_line_bytes = fh.read()
+
+        last_line = last_line_bytes.decode("utf-8").strip()
+        if not last_line:
+            return None
+        record = json.loads(last_line)
+        return record.get("query_id")
+    except Exception as exc:  # noqa: BLE001
+        LOG.warning("Could not read last query_id from %s: %s", output_path, exc)
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Pipeline
+# ---------------------------------------------------------------------------
 
 class ConflictPipeline:
     def __init__(self, config: PipelineConfig, retrieval: MedRAGRetrievalManager | None = None):
@@ -36,6 +97,10 @@ class ConflictPipeline:
         self.retrieval = retrieval or MedRAGRetrievalManager(config)
         self.nli = NLIClassifier(config)
         self.pke = ParametricKnowledgeEstimator(config)
+
+    # ------------------------------------------------------------------
+    # Query processing
+    # ------------------------------------------------------------------
 
     def _process_query(self, query_id: str, query: str, gold_answer: str) -> dict:
         LOG.info("Processing query started: query_id=%s", query_id)
@@ -72,6 +137,10 @@ class ConflictPipeline:
             len(scenario["non_conflictual_elements"]),
         )
         return scenario
+
+    # ------------------------------------------------------------------
+    # Public runners
+    # ------------------------------------------------------------------
 
     def run_pubmedqa(
         self, n_questions: int, output_filename: str, split: str = "train"
@@ -111,51 +180,41 @@ class ConflictPipeline:
             self._iter_medmcqa(dataset, n_questions),
         )
 
-    def _iter_pubmedqa(self, dataset, n_questions: int):
+    # ------------------------------------------------------------------
+    # Raw iterators  (yield tuples, no GPU work)
+    # ------------------------------------------------------------------
+
+    def _iter_pubmedqa(self, dataset, n_questions: int) -> Iterator[_RawQuestion]:
         limit = min(n_questions, len(dataset))
         for idx in range(limit):
             row = dataset[idx]
             query_id = str(row["pubid"])
             query = row["question"]
             gold_answer = pubmedqa_gold_answer(row)
-            LOG.info("PubMedQA question %s/%s: query_id=%s preview=%r", idx + 1, limit, query_id, query[:100])
-            yield self._process_query(query_id, query, gold_answer)
+            LOG.debug("PubMedQA question %s/%s: query_id=%s", idx + 1, limit, query_id)
+            yield query_id, query, gold_answer
 
-    def _iter_mmlu_med(self, dataset, n_questions: int):
+    def _iter_mmlu_med(self, dataset, n_questions: int) -> Iterator[_RawQuestion]:
         limit = min(n_questions, len(dataset))
         for idx in range(limit):
             row = dataset[idx]
             query, options, gold_letter = format_mmlu_mcq(row)
             query_id = f"mmlu_med_{row['mmlu_subset']}_{idx}"
             gold_answer = options[gold_letter]
-            LOG.info(
-                "MMLU-Med question %s/%s: query_id=%s gold=%s preview=%r",
-                idx + 1,
-                limit,
-                query_id,
-                gold_letter,
-                row["question"][:100],
-            )
-            yield self._process_query(query_id, query, gold_answer)
+            LOG.debug("MMLU-Med question %s/%s: query_id=%s gold=%s", idx + 1, limit, query_id, gold_letter)
+            yield query_id, query, gold_answer
 
-    def _iter_medqa_us(self, dataset, n_questions: int):
+    def _iter_medqa_us(self, dataset, n_questions: int) -> Iterator[_RawQuestion]:
         limit = min(n_questions, len(dataset))
         for idx in range(limit):
             row = dataset[idx]
             query, options, gold_letter = format_medqa_us_mcq(row)
             query_id = f"medqa_us_{idx}"
             gold_answer = options[gold_letter]
-            LOG.info(
-                "MedQA-US question %s/%s: query_id=%s gold=%s preview=%r",
-                idx + 1,
-                limit,
-                query_id,
-                gold_letter,
-                row["question"][:100],
-            )
-            yield self._process_query(query_id, query, gold_answer)
+            LOG.debug("MedQA-US question %s/%s: query_id=%s gold=%s", idx + 1, limit, query_id, gold_letter)
+            yield query_id, query, gold_answer
 
-    def _iter_medmcqa(self, dataset, n_questions: int):
+    def _iter_medmcqa(self, dataset, n_questions: int) -> Iterator[_RawQuestion]:
         limit = min(n_questions, len(dataset))
         for idx in range(limit):
             row = dataset[idx]
@@ -163,30 +222,68 @@ class ConflictPipeline:
             row_id = row.get("id", str(idx))
             query_id = f"medmcqa_{row_id}"
             gold_answer = options[gold_letter]
-            LOG.info(
-                "MedMCQA question %s/%s: query_id=%s gold=%s subject=%s preview=%r",
-                idx + 1,
-                limit,
-                query_id,
-                gold_letter,
-                row.get("subject_name", ""),
-                row["question"][:100],
+            LOG.debug(
+                "MedMCQA question %s/%s: query_id=%s gold=%s subject=%s",
+                idx + 1, limit, query_id, gold_letter, row.get("subject_name", ""),
             )
-            yield self._process_query(query_id, query, gold_answer)
+            yield query_id, query, gold_answer
 
-    def _write_scenarios(self, output_path: Path, scenarios) -> tuple[Path, dict]:
+    # ------------------------------------------------------------------
+    # Writer  (handles resume + append)
+    # ------------------------------------------------------------------
+
+    def _write_scenarios(
+        self,
+        output_path: Path,
+        raw_questions: Iterator[_RawQuestion],
+    ) -> tuple[Path, dict]:
         output_path.parent.mkdir(parents=True, exist_ok=True)
         stats = {"total": 0, "with_conflict": 0, "IC": 0, "CM": 0, "IM": 0}
-        LOG.info("Writing scenarios to %s", output_path)
 
-        with output_path.open("w", encoding="utf-8") as handle:
-            for scenario in scenarios:
+        # --- Resume detection -------------------------------------------------
+        last_id = read_last_query_id(output_path)
+        if last_id is not None:
+            LOG.info(
+                "Resume detected: last written query_id=%s — opening %s in append mode",
+                last_id,
+                output_path,
+            )
+            file_mode = "a"
+        else:
+            LOG.info("Fresh run: opening %s in write mode", output_path)
+            file_mode = "w"
+        # ----------------------------------------------------------------------
+
+        skipping = last_id is not None  # True until we drain past last_id
+        skipped = 0
+
+        with output_path.open(file_mode, encoding="utf-8") as handle:
+            for query_id, query, gold_answer in raw_questions:
+
+                # Skip questions that were already written in a previous run.
+                if skipping:
+                    LOG.info("Skipping already processed: query_id=%s", query_id)
+                    skipped += 1
+                    if query_id == last_id:
+                        skipping = False  # next iteration will be processed
+                    continue
+
+                # --- Process and write ----------------------------------------
+                LOG.info(
+                    "Processing question: query_id=%s (skipped=%s so far)",
+                    query_id,
+                    skipped,
+                )
+                scenario = self._process_query(query_id, query, gold_answer)
                 handle.write(json.dumps(scenario, ensure_ascii=False) + "\n")
+                handle.flush()  # ensure line is on disk before next query starts
+
                 stats["total"] += 1
                 if scenario["conflicts"]:
                     stats["with_conflict"] += 1
                 for conflict in scenario["conflicts"]:
                     stats[conflict["type"]] += 1
+
                 LOG.info(
                     "Scenario written: query_id=%s conflicts=%s total_written=%s",
                     scenario["query_id"],
@@ -194,7 +291,16 @@ class ConflictPipeline:
                     stats["total"],
                 )
 
-        LOG.info("Pipeline finished: output_path=%s", output_path)
+        if skipping and last_id is not None:
+            # The dataset was exhausted before we reached last_id — this
+            # should not happen in normal usage but is worth reporting.
+            LOG.warning(
+                "Resume target query_id=%s was never found in the dataset iterator. "
+                "The output file may already be complete.",
+                last_id,
+            )
+
+        LOG.info("Pipeline finished: output_path=%s skipped=%s", output_path, skipped)
         LOG.info(
             "Scenario stats: total=%s with_conflict=%s IC=%s CM=%s IM=%s",
             stats["total"],
@@ -205,6 +311,10 @@ class ConflictPipeline:
         )
         return output_path, stats
 
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def pubmedqa_gold_answer(row) -> str:
     if "long_answer" in row and row["long_answer"]:
