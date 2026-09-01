@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import logging
+
+
+LOG = logging.getLogger(__name__)
 
 MMLU_MED_SUBSETS = [
     "anatomy",
@@ -16,24 +20,24 @@ MMLU_MED_SUBSETS = [
 def load_pubmedqa(split: str = "train"):
     from datasets import load_dataset
 
+    LOG.info("Loading PubMedQA dataset: split=%s", split)
     dataset = load_dataset("qiaojin/PubMedQA", "pqa_labeled", split=split)
-    print(f"PubMedQA ({split}): {len(dataset)} questions loaded.")
+    LOG.info("PubMedQA loaded: split=%s count=%s", split, len(dataset))
     return dataset
 
 
 def load_mmlu_med(split: str = "test"):
     from datasets import concatenate_datasets, load_dataset
 
+    LOG.info("Loading MMLU-Med dataset: split=%s", split)
     subsets = []
     for name in MMLU_MED_SUBSETS:
+        LOG.info("Loading MMLU subset: %s", name)
         dataset = load_dataset("cais/mmlu", name, split=split)
         dataset = dataset.add_column("mmlu_subset", [name] * len(dataset))
         subsets.append(dataset)
     mmlu_med = concatenate_datasets(subsets)
-    print(
-        f"MMLU-Med ({split}): {len(mmlu_med)} questions loaded "
-        f"({', '.join(MMLU_MED_SUBSETS)})."
-    )
+    LOG.info("MMLU-Med loaded: split=%s count=%s", split, len(mmlu_med))
     return mmlu_med
 
 

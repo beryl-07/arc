@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 from itertools import combinations
+import logging
 from typing import Any
 
 from .nli import NLIClassifier
 
 
 Element = dict[str, Any]
+LOG = logging.getLogger(__name__)
 
 
 def normalize_retrieved_elements(retrieval_results: dict) -> list[Element]:
@@ -31,6 +33,7 @@ def normalize_retrieved_elements(retrieval_results: dict) -> list[Element]:
                     "content": snippet.get("content"),
                 }
             )
+    LOG.info("Normalized retrieved elements: count=%s", len(elements))
     return elements
 
 
@@ -51,6 +54,7 @@ def normalize_parametric_elements(probes: list[str], model_name: str) -> list[El
                 "content": None,
             }
         )
+    LOG.info("Normalized parametric elements: count=%s", len(elements))
     return elements
 
 
@@ -69,6 +73,7 @@ def infer_conflict_type(left: Element, right: Element) -> str:
 
 def detect_conflicts(query_id: str, elements: list[Element], nli: NLIClassifier) -> list[dict]:
     pairs = list(combinations(range(len(elements)), 2))
+    LOG.info("Detecting conflicts: query_id=%s elements=%s pairs=%s", query_id, len(elements), len(pairs))
     nli_inputs = [(elements[i]["text"], elements[j]["text"]) for i, j in pairs]
     results = nli.classify_pairs(nli_inputs) if nli_inputs else []
 
@@ -97,9 +102,14 @@ def detect_conflicts(query_id: str, elements: list[Element], nli: NLIClassifier)
     counts = {"IC": 0, "CM": 0, "IM": 0}
     for conflict in conflicts:
         counts[conflict["type"]] += 1
-    print(
-        f"  conflicts: {len(conflicts)} total over {len(pairs)} pairs "
-        f"(IC={counts['IC']} CM={counts['CM']} IM={counts['IM']})."
+    LOG.info(
+        "Conflict detection finished: query_id=%s total=%s pairs=%s IC=%s CM=%s IM=%s",
+        query_id,
+        len(conflicts),
+        len(pairs),
+        counts["IC"],
+        counts["CM"],
+        counts["IM"],
     )
     return conflicts
 

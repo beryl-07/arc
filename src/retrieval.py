@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import logging
 import sys
 import time
 from pathlib import Path
@@ -12,12 +13,16 @@ from .config import PipelineConfig
 from .environment import ensure_medrag_repo, prepare_statpearls
 
 
+LOG = logging.getLogger(__name__)
+
+
 def _load_medrag_utils(repo_dir: Path) -> ModuleType:
     """Load MedRAG's src/utils.py without colliding with this project's src package."""
 
     utils_path = repo_dir / "src" / "utils.py"
     if not utils_path.exists():
         raise RuntimeError(f"MedRAG utils.py not found at {utils_path}")
+    LOG.info("Loading MedRAG utilities from %s", utils_path)
 
     repo_src = str(repo_dir / "src")
     repo_root = str(repo_dir)
@@ -36,6 +41,7 @@ def _load_medrag_utils(repo_dir: Path) -> ModuleType:
 class MedRAGRetrievalManager:
     def __init__(self, config: PipelineConfig):
         self.config = config
+        LOG.info("Initializing MedRAG retrieval manager")
         repo_dir = ensure_medrag_repo(config)
         self.medrag_utils = _load_medrag_utils(repo_dir)
         self._patch_dense_index_dir()
@@ -75,7 +81,7 @@ class MedRAGRetrievalManager:
         retriever_cls._arc_index_patch_applied = True
 
     def init_retriever(self, retriever_key: str):
-        print(f"\n=== Init {retriever_key} ===")
+        LOG.info("Initializing retriever: %s", retriever_key)
         self._prepare_corpus_dependencies()
         start = time.time()
         system = self.medrag_utils.RetrievalSystem(
@@ -87,7 +93,7 @@ class MedRAGRetrievalManager:
         )
         self.systems[retriever_key] = system
         elapsed = (time.time() - start) / 60
-        print(f"{retriever_key} ready in {elapsed:.1f} min.")
+        LOG.info("Retriever ready: %s elapsed_min=%.1f", retriever_key, elapsed)
         return system
 
     def _prepare_corpus_dependencies(self) -> None:
@@ -95,11 +101,12 @@ class MedRAGRetrievalManager:
         native_corpora = self.corpus_names.get(corpus_key, [corpus_key])
         if "statpearls" not in native_corpora or "statpearls" in self._prepared_dependencies:
             return
-        print("Preparing StatPearls corpus before MedRAG retriever initialization.")
+        LOG.info("Preparing StatPearls corpus before MedRAG retriever initialization")
         prepare_statpearls(self.config)
         self._prepared_dependencies.add("statpearls")
 
     def init_all(self) -> None:
+        LOG.info("Initializing all retrievers: %s", ",".join(self.config.retrievers))
         for retriever in self.config.retrievers:
             self.init_retriever(retriever)
 
@@ -107,8 +114,10 @@ class MedRAGRetrievalManager:
         if not self.systems:
             self.init_all()
         top_k = k or self.config.top_k
+        LOG.info("Running retrieval for query: top_k=%s query_preview=%r", top_k, question_text[:120])
         results: dict[str, list[dict]] = {}
         for key, system in self.systems.items():
+            LOG.info("Retrieving with %s", key)
             snippets, scores = system.retrieve(question_text, k=top_k, id_only=False)
             results[key] = [
                 {
@@ -122,5 +131,5 @@ class MedRAGRetrievalManager:
                 }
                 for i, snippet in enumerate(snippets)
             ]
-            print(f"  {key:12s} -> {len(results[key])} snippets")
+            LOG.info("Retriever returned snippets: retriever=%s count=%s", key, len(results[key]))
         return results

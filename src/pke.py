@@ -2,7 +2,12 @@
 
 from __future__ import annotations
 
+import logging
+
 from .config import PipelineConfig
+
+
+LOG = logging.getLogger(__name__)
 
 
 class ParametricKnowledgeEstimator:
@@ -16,14 +21,14 @@ class ParametricKnowledgeEstimator:
             import torch
             from transformers import AutoModelForCausalLM, AutoTokenizer
 
-            print(f"Loading PKE LLM ({self.config.pke_model})...")
+            LOG.info("Loading PKE LLM: model=%s", self.config.pke_model)
             self._tokenizer = AutoTokenizer.from_pretrained(self.config.pke_model)
             self._model = AutoModelForCausalLM.from_pretrained(
                 self.config.pke_model,
                 torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
                 device_map="auto",
             )
-            print("PKE LLM loaded.")
+            LOG.info("PKE LLM loaded: model=%s", self.config.pke_model)
         return self._model, self._tokenizer
 
     def generate(self, question: str) -> str:
@@ -48,10 +53,10 @@ class ParametricKnowledgeEstimator:
 
     def estimate(self, question: str) -> dict:
         probes = []
-        print(f"  PKE: running {self.config.n_probes} probes...")
+        LOG.info("Running PKE probes: n_probes=%s", self.config.n_probes)
         for idx in range(self.config.n_probes):
             answer = self.generate(question)
             probes.append(answer)
-            print(f"    probe {idx + 1}/{self.config.n_probes}: {answer[:80]}...")
+            LOG.info("PKE probe finished: index=%s/%s preview=%r", idx + 1, self.config.n_probes, answer[:80])
 
         return {"probes": probes}
