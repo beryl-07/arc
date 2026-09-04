@@ -14,26 +14,61 @@ LOG = logging.getLogger(__name__)
 
 
 def normalize_retrieved_elements(retrieval_results: dict) -> list[Element]:
-    elements = []
+    # Stage 1 – collect all snippets, keyed by document_id for deduplication.
+    # When the same document is returned by multiple retrievers we keep the
+    # entry with the highest retrieval score and record every retriever that
+    # found it so that provenance is preserved.
+    best_by_doc: dict[str, Element] = {}   # document_id -> best element so far
+    total_raw = 0
+
     for retriever, snippets in retrieval_results.items():
         for snippet in snippets:
+            total_raw += 1
             rank = int(snippet.get("rank", 0))
+            score = float(snippet.get("score", 0.0))
             document_id = snippet.get("document_id")
-            elements.append(
-                {
+
+            if document_id in best_by_doc:
+                # Duplicate – merge retriever info, keep highest-scored version
+                existing = best_by_doc[document_id]
+                if retriever not in existing["retrievers"]:
+                    existing["retrievers"].append(retriever)
+                if score > existing["score"]:
+                    existing.update(
+                        {
+                            "_element_id": f"retrieved:{retriever}:{rank}:{document_id}",
+                            "rank": rank,
+                            "score": score,
+                            "title": snippet.get("title", ""),
+                            "text": snippet.get("text", ""),
+                            "source_corpus": snippet.get("source_corpus", ""),
+                            "retriever": retriever,
+                            "content": snippet.get("content"),
+                        }
+                    )
+            else:
+                best_by_doc[document_id] = {
                     "_element_id": f"retrieved:{retriever}:{rank}:{document_id}",
                     "source_type": "retrieved",
                     "rank": rank,
-                    "score": float(snippet.get("score", 0.0)),
+                    "score": score,
                     "document_id": document_id,
                     "title": snippet.get("title", ""),
                     "text": snippet.get("text", ""),
                     "source_corpus": snippet.get("source_corpus", ""),
                     "retriever": retriever,
+                    "retrievers": [retriever],
                     "content": snippet.get("content"),
                 }
-            )
-    LOG.info("Normalized retrieved elements: count=%s", len(elements))
+
+    elements = list(best_by_doc.values())
+    duplicates_removed = total_raw - len(elements)
+    LOG.info(
+        "Normalized retrieved elements: raw=%s unique=%s duplicates_removed=%s",
+        total_raw,
+        len(elements),
+        duplicates_removed,
+    )
     return elements
 
 
