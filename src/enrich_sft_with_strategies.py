@@ -431,32 +431,55 @@ def resolve_gold_reference(record: dict[str, Any]) -> tuple[str | None, str, boo
         normalized_option = normalize_text(option_text)
         if normalized_gold == normalized_option:
             return letter, option_text, False
-    for letter, option_text in options.items():
-        normalized_option = normalize_text(option_text)
-        if normalized_gold and (normalized_gold in normalized_option or normalized_option in normalized_gold):
-            return letter, option_text, False
 
     return None, raw_gold, False
 
 
 def extract_choice_letters(text: str) -> list[str]:
-    return re.findall(r"\b([ABCD])\b", text.upper())
+    """Extract explicit multiple-choice letters from a model response.
+
+    The extractor is intentionally strict: it only accepts answers that are
+    clearly formatted as a choice label or a short labeled answer. This avoids
+    treating ordinary prose like "A patient..." as a valid answer.
+    """
+
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        lines = [text.strip()]
+
+    patterns = (
+        re.compile(r"^(?:answer(?: is)?|final answer|option|choice)\s*[:\-]?\s*[\(\[]?\s*([ABCD])\s*[\)\].:!\-]?\s*$", re.IGNORECASE),
+        re.compile(r"^(?:\d+\s*[\).:-]\s*)?[\(\[]?\s*([ABCD])\s*[\)\].:!\-]?\s*$", re.IGNORECASE),
+    )
+
+    letters: list[str] = []
+    for line in lines:
+        for pattern in patterns:
+            match = pattern.match(line)
+            if match:
+                letters.append(match.group(1).upper())
+                break
+
+    if letters:
+        return letters
+
+    inline_pattern = re.compile(
+        r"(?:^|\n)\s*(?:answer(?: is)?|final answer|option|choice)\s*[:\-]?\s*[\(\[]?\s*([ABCD])\s*[\)\].:!\-]?(?:\s|$)",
+        re.IGNORECASE,
+    )
+    return [match.group(1).upper() for match in inline_pattern.finditer(text)]
 
 
 def matches_gold(text: str, gold_letter: str | None, gold_text: str) -> bool:
     letters = extract_choice_letters(text)
-    if gold_letter and gold_letter in letters:
-        return True
+    if gold_letter:
+        return bool(letters) and letters[0] == gold_letter
 
     normalized_text = normalize_text(text)
     normalized_gold = normalize_text(gold_text)
     if not normalized_gold:
         return False
-
-    if normalized_gold == normalized_text:
-        return True
-
-    return normalized_gold in normalized_text or normalized_text in normalized_gold
+    return normalized_gold == normalized_text
 
 
 def evaluate_response(
@@ -472,6 +495,8 @@ def evaluate_response(
     if strategy_id in {"S3", "S6"}:
         if gold_letter and gold_letter in extract_choice_letters(response):
             return True
+        if gold_letter:
+            return False
         return matches_gold(response, gold_letter, gold_text)
 
     return matches_gold(response, gold_letter, gold_text)
