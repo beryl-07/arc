@@ -16,7 +16,7 @@ This workspace is a reusable Python project for Phase 1 of the methodology:
 ## Project Layout
 
 ```text
-.
+. 
 +-- images/
 |   +-- methodology.svg
 +-- requirements.txt
@@ -29,17 +29,17 @@ This workspace is a reusable Python project for Phase 1 of the methodology:
     +-- nli.py              # NLI model wrapper
     +-- pipeline.py         # end-to-end scenario builders
     +-- pke.py              # parametric knowledge estimation
-    +-- sft_dataset.py      # SFT prompt, label, and split construction helpers
+    +-- sft_dataset.py      # SFT dataset construction pipeline
     +-- retrieval.py        # MedRAG retrieval manager
     +-- utils.py            # JSONL helpers
 ```
 
 ```text
 +-- notebooks/
-    +-- run_sft_dataset_from_gitlab.ipynb
     +-- run_mmlu_med_from_gitlab.ipynb
     +-- run_medqa_us_from_gitlab.ipynb
     +-- run_medmcqa_from_gitlab.ipynb
+    +-- run_sft_dataset_from_gitlab.ipynb
 ```
 
 ## Requirements
@@ -149,38 +149,29 @@ python -m src.cli --prepare-statpearls --dataset pubmedqa --n-questions 10
 
 ## SFT Dataset Construction
 
-The SFT stage is built from the scenario JSONL files and strategy executions.
-The helper module keeps the question-level split fixed before any strategy
-augmentation.
+The SFT pipeline runs the model once per strategy, compares each response to
+the scenario `gold_answer`, records every strategy that is correct, then splits
+the resulting question-level records before expanding them into SFT examples.
 
-Generate one controlled-execution prompt per strategy:
-
-```bash
-python -m src.sft_dataset prompts data/mmlu_med_scenarios.jsonl data/sft/prompts.jsonl
-```
-
-Write one prompt file per strategy:
+Run it from the repository root:
 
 ```bash
-python -m src.sft_dataset prompts data/mmlu_med_scenarios.jsonl data/sft/prompts --by-strategy
+python -m src.sft_dataset data/mmlu_med_scenarios.jsonl outputs/sft
 ```
 
-Aggregate execution outputs into multi-label strategy sets:
+The command writes:
 
-```bash
-python -m src.sft_dataset labels data/sft/executions.jsonl data/sft/valid_strategies.jsonl
+```text
+outputs/sft/questions.jsonl
+outputs/sft/valid_strategies.jsonl
+outputs/sft/train.jsonl
+outputs/sft/validation.jsonl
+outputs/sft/test.jsonl
 ```
 
-Build train/validation/test SFT splits from validated executions:
-
-```bash
-python -m src.sft_dataset sft data/sft/executions.jsonl data/sft \
-  --labels data/sft/valid_strategies.jsonl
-```
-
-The resulting JSONL records keep the `question_id`, `strategy_id`, the
-scenario/question context, the raw execution output, and the correctness score
-so the labels can be regenerated without rerunning the model.
+Each question record keeps the original scenario, the raw answer from all eight
+strategies, and `valid_strategies` with only the strategies that matched the
+gold answer.
 
 The notebook runner is available at
 [notebooks/run_sft_dataset_from_gitlab.ipynb](/home/beryl/Documents/M2-IMSP/master-thesis/ARC/notebooks/run_sft_dataset_from_gitlab.ipynb).

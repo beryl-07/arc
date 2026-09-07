@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
+import re
 from dataclasses import dataclass
+from hashlib import sha256
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -14,20 +15,19 @@ from typing import Any, Iterator
 LOG = logging.getLogger(__name__)
 
 STRATEGY_ORDER = ("S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8")
+ABSTENTION_TEXT = "The documents cannot answer this question."
 
 
 # ---------------------------------------------------------------------------
 # Strategy prompts
 # ---------------------------------------------------------------------------
 
+
 @dataclass(frozen=True)
 class StrategySpec:
-    """Prompt metadata for one controlled execution strategy."""
-
     strategy_id: str
     name: str
     prompt: str
-    output_label: str = "Answer:"
 
 
 STRATEGY_SPECS: dict[str, StrategySpec] = {
@@ -72,7 +72,6 @@ STRATEGY_SPECS: dict[str, StrategySpec] = {
             "Output only the two short answers, without explanation.\n\n"
             "Answers:"
         ),
-        output_label="Answers:",
     ),
     "S4": StrategySpec(
         strategy_id="S4",
@@ -112,7 +111,6 @@ STRATEGY_SPECS: dict[str, StrategySpec] = {
             "Output only the short answers, without explanation.\n\n"
             "Answers:"
         ),
-        output_label="Answers:",
     ),
     "S7": StrategySpec(
         strategy_id="S7",
@@ -150,9 +148,8 @@ STRATEGY_SPECS: dict[str, StrategySpec] = {
 # JSONL helpers
 # ---------------------------------------------------------------------------
 
-def load_jsonl(path: Path) -> list[dict[str, Any]]:
-    """Load a JSONL file into memory."""
 
+def load_jsonl(path: Path) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     with path.open("r", encoding="utf-8") as handle:
         for line_number, line in enumerate(handle, start=1):
@@ -170,8 +167,6 @@ def load_jsonl(path: Path) -> list[dict[str, Any]]:
 
 
 def write_jsonl(path: Path, records: Iterator[dict[str, Any]] | list[dict[str, Any]]) -> int:
-    """Write records to JSONL and return the number of written lines."""
-
     path.parent.mkdir(parents=True, exist_ok=True)
     count = 0
     with path.open("w", encoding="utf-8") as handle:
@@ -182,55 +177,58 @@ def write_jsonl(path: Path, records: Iterator[dict[str, Any]] | list[dict[str, A
 
 
 # ---------------------------------------------------------------------------
-# Split helpers
+# Model runner
 # ---------------------------------------------------------------------------
 
-def _stable_bucket(question_id: str, seed: int) -> float:
-    digest = hashlib.sha256(f"{seed}:{question_id}".encode("utf-8")).digest()
-    return int.from_bytes(digest[:8], "big") / float(2**64)
 
+class StrategyRunner:
+    """Load the local LLM once and reuse it for all eight strategy calls."""
 
-def validate_split_ratios(train_ratio: float, validation_ratio: float, test_ratio: float) -> None:
-    total = train_ratio + validation_ratio + test_ratio
-    if train_ratio < 0 or validation_ratio < 0 or test_ratio < 0:
-        raise ValueError("Split ratios must be non-negative.")
-    if abs(total - 1.0) > 1e-6:
-        raise ValueError("Split ratios must sum to 1.0.")
+    def __init__(self, model_name: str, temperature: float, max_new_tokens: int):
+        self.model_name = model_name
+        self.temperature = temperature
+        self.max_new_tokens = max_new_tokens
+        self._model = None
+        self._tokenizer = None
 
+    def load_model(self):
+        if self._model is None:
+            import torch
+            from transformers import AutoModelForCausalLM, AutoTokenizer
 
-def assign_split(question_id: str, seed: int, train_ratio: float, validation_ratio: float, test_ratio: float) -> str:
-    bucket = _stable_bucket(question_id, seed)
-    if bucket < train_ratio:
-        return "train"
-    if bucket < train_ratio + validation_ratio:
-        return "validation"
-    return "test"
+            LOG.info("Loading SFT model: model=%s", self.model_name)
+            self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
+            self._model = AutoModelForCausalLM.from_pretrained(
+                self.model_name,
+                torch_dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+                device_map="auto",
+            )
+            LOG.info("SFT model loaded: model=%s", self.model_name)
+        return self._model, self._tokenizer
 
+    def generate(self, prompt: str) -> str:
+        import torch
 
-def split_question_ids(
-    question_ids: list[str],
-    seed: int = 42,
-    train_ratio: float = 0.8,
-    validation_ratio: float = 0.1,
-    test_ratio: float = 0.1,
-) -> dict[str, list[str]]:
-    """Split question ids before any strategy augmentation."""
-
-    validate_split_ratios(train_ratio, validation_ratio, test_ratio)
-    split_map = {"train": [], "validation": [], "test": []}
-    for question_id in sorted(set(question_ids)):
-        split_name = assign_split(question_id, seed, train_ratio, validation_ratio, test_ratio)
-        split_map[split_name].append(question_id)
-    return split_map
+        model, tokenizer = self.load_model()
+        inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
+        with torch.no_grad():
+            output = model.generate(
+                **inputs,
+                max_new_tokens=self.max_new_tokens,
+                temperature=self.temperature,
+                do_sample=True,
+                pad_token_id=tokenizer.eos_token_id,
+            )
+        generated = output[0][inputs["input_ids"].shape[1] :]
+        return tokenizer.decode(generated, skip_special_tokens=True).strip()
 
 
 # ---------------------------------------------------------------------------
-# Scenario flattening
+# Scenario helpers
 # ---------------------------------------------------------------------------
+
 
 def flatten_scenario_documents(scenario: dict[str, Any]) -> list[dict[str, Any]]:
-    """Collect unique document-like evidence units from one scenario."""
-
     raw_documents: list[dict[str, Any]] = []
     for conflict in scenario.get("conflicts", []):
         if not isinstance(conflict, dict):
@@ -274,18 +272,11 @@ def flatten_scenario_documents(scenario: dict[str, Any]) -> list[dict[str, Any]]
 def assign_document_ids(documents: list[dict[str, Any]]) -> list[dict[str, Any]]:
     output: list[dict[str, Any]] = []
     for index, document in enumerate(documents, start=1):
-        output.append(
-            {
-                "id": f"D{index}",
-                **document,
-            }
-        )
+        output.append({"id": f"D{index}", **document})
     return output
 
 
 def render_documents(documents: list[dict[str, Any]]) -> str:
-    """Render documents in a stable, prompt-friendly format."""
-
     blocks: list[str] = []
     for document in documents:
         lines = [f"[Document {document['id']}]"]
@@ -298,22 +289,15 @@ def render_documents(documents: list[dict[str, Any]]) -> str:
     return "\n\n".join(blocks)
 
 
-# ---------------------------------------------------------------------------
-# Prompt builders
-# ---------------------------------------------------------------------------
-
-def build_execution_prompt(question: str, documents: list[dict[str, Any]], strategy_id: str) -> str:
-    """Build the controlled-execution prompt for one strategy."""
-
+def build_strategy_prompt(strategy_id: str, question: str, documents: list[dict[str, Any]]) -> str:
     if strategy_id not in STRATEGY_SPECS:
         raise KeyError(f"Unknown strategy_id: {strategy_id}")
     spec = STRATEGY_SPECS[strategy_id]
-    rendered_documents = render_documents(documents)
-    return spec.prompt.format(documents=rendered_documents, question=question)
+    return spec.prompt.format(question=question, documents=render_documents(documents))
 
 
-def build_execution_messages(question: str, documents: list[dict[str, Any]], strategy_id: str) -> list[dict[str, str]]:
-    prompt = build_execution_prompt(question, documents, strategy_id)
+def build_strategy_messages(strategy_id: str, question: str, documents: list[dict[str, Any]]) -> list[dict[str, str]]:
+    prompt = build_strategy_prompt(strategy_id, question, documents)
     return [
         {
             "role": "system",
@@ -324,285 +308,238 @@ def build_execution_messages(question: str, documents: list[dict[str, Any]], str
 
 
 # ---------------------------------------------------------------------------
-# Execution aggregation
+# Evaluation helpers
 # ---------------------------------------------------------------------------
 
-def normalize_execution_record(record: dict[str, Any]) -> dict[str, Any]:
-    """Normalize execution outputs into the aggregator schema."""
 
-    question_id = str(record.get("question_id") or record.get("query_id") or "")
-    strategy_id = str(record.get("strategy_id") or "")
-    if not question_id:
-        raise ValueError("Execution record is missing question_id/query_id.")
-    if strategy_id not in STRATEGY_SPECS:
-        raise ValueError(f"Execution record has unknown strategy_id: {strategy_id}")
-
-    return {
-        "question_id": question_id,
-        "strategy_id": strategy_id,
-        "answer": record.get("answer", ""),
-        "correct": bool(record.get("correct", False)),
-        "score": record.get("score"),
-        "prompt": record.get("prompt"),
-        "scenario": record.get("scenario"),
-        "metadata": record.get("metadata", {}),
-    }
+_LEADING_LABEL_RE = re.compile(r"^\s*(answer|answers)\s*:\s*", re.IGNORECASE)
+_LEADING_BULLET_RE = re.compile(r"^\s*(?:[-*•]+|\d+[.)])\s*")
+_LEADING_OPTION_RE = re.compile(r"^\s*[A-H]\s*[\.\):\-]\s*")
+_ARTICLES_RE = re.compile(r"\b(a|an|the)\b", re.IGNORECASE)
 
 
-def aggregate_valid_strategies(execution_records: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Build multi-label question records from per-strategy executions."""
+def extract_answer_candidates(response: str) -> list[str]:
+    response = response.strip()
+    if not response:
+        return []
 
-    grouped: dict[str, dict[str, Any]] = {}
-    for record in execution_records:
-        normalized = normalize_execution_record(record)
-        bucket = grouped.setdefault(
-            normalized["question_id"],
-            {
-                "question_id": normalized["question_id"],
-                "valid_strategies": [],
-                "executions": {},
-            },
-        )
-        bucket["executions"][normalized["strategy_id"]] = {
-            "correct": normalized["correct"],
-            "answer": normalized["answer"],
-            "score": normalized["score"],
-        }
-        if normalized["correct"]:
-            bucket["valid_strategies"].append(normalized["strategy_id"])
+    candidates: list[str] = []
+    for chunk in re.split(r"[\n;]+", response):
+        item = chunk.strip()
+        if not item:
+            continue
+        item = _LEADING_LABEL_RE.sub("", item)
+        item = _LEADING_BULLET_RE.sub("", item)
+        item = _LEADING_OPTION_RE.sub("", item)
+        if item:
+            candidates.append(item)
 
-    output: list[dict[str, Any]] = []
-    for question_id in sorted(grouped):
-        bucket = grouped[question_id]
-        bucket["valid_strategies"] = [
-            strategy_id for strategy_id in STRATEGY_ORDER if strategy_id in set(bucket["valid_strategies"])
-        ]
-        output.append(bucket)
-    return output
-
-
-# ---------------------------------------------------------------------------
-# SFT examples
-# ---------------------------------------------------------------------------
-
-def build_execution_candidate(scenario: dict[str, Any], strategy_id: str) -> dict[str, Any]:
-    question_id = str(scenario.get("query_id", ""))
-    question = str(scenario.get("query", ""))
-    documents = assign_document_ids(flatten_scenario_documents(scenario))
-    prompt = build_execution_prompt(question, documents, strategy_id)
-    return {
-        "question_id": question_id,
-        "strategy_id": strategy_id,
-        "question": question,
-        "input": {
-            "question": question,
-            "documents": documents,
-        },
-        "documents": documents,
-        "prompt": prompt,
-        "messages": build_execution_messages(question, documents, strategy_id),
-        "scenario": {
-            "query_id": question_id,
-            "query": question,
-            "gold_answer": scenario.get("gold_answer", ""),
-            "conflicts": scenario.get("conflicts", []),
-            "non_conflictual_elements": scenario.get("non_conflictual_elements", []),
-        },
-    }
-
-
-def build_execution_candidates(
-    scenarios: list[dict[str, Any]],
-    strategy_ids: tuple[str, ...] = STRATEGY_ORDER,
-) -> list[dict[str, Any]]:
-    candidates: list[dict[str, Any]] = []
-    for scenario in scenarios:
-        for strategy_id in strategy_ids:
-            candidates.append(build_execution_candidate(scenario, strategy_id))
+    if not candidates:
+        candidates.append(response)
     return candidates
 
 
-def build_sft_example_from_execution(
-    execution_record: dict[str, Any],
-    valid_strategies_by_question: dict[str, list[str]],
-    include_selection_target: bool = False,
+def normalize_answer(text: str) -> str:
+    text = text.strip().lower()
+    text = text.replace("\n", " ")
+    text = _LEADING_LABEL_RE.sub("", text)
+    text = _LEADING_BULLET_RE.sub("", text)
+    text = _LEADING_OPTION_RE.sub("", text)
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    text = _ARTICLES_RE.sub(" ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
+
+
+def is_correct_response(response: str, gold_answer: str, strategy_id: str) -> bool:
+    gold_norm = normalize_answer(gold_answer)
+    if not gold_norm:
+        return False
+
+    for candidate in extract_answer_candidates(response):
+        candidate_norm = normalize_answer(candidate)
+        if not candidate_norm:
+            continue
+
+        if candidate_norm == gold_norm:
+            return True
+        if gold_norm in candidate_norm or candidate_norm in gold_norm:
+            return True
+
+        if strategy_id in {"S3", "S6"}:
+            if any(
+                gold_norm == normalize_answer(piece)
+                for piece in re.split(r"[\n;]+", candidate)
+                if piece.strip()
+            ):
+                return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Record builders
+# ---------------------------------------------------------------------------
+
+
+def build_question_record(
+    scenario: dict[str, Any],
+    strategy_outputs: dict[str, dict[str, Any]],
+    model_name: str,
 ) -> dict[str, Any]:
-    normalized = normalize_execution_record(execution_record)
-    if not normalized["correct"]:
-        raise ValueError("SFT examples must be built from correct execution records.")
+    question_id = str(scenario.get("query_id", ""))
+    question = str(scenario.get("query", ""))
+    gold_answer = str(scenario.get("gold_answer", ""))
+    documents = assign_document_ids(flatten_scenario_documents(scenario))
 
-    question_id = normalized["question_id"]
-    strategy_id = normalized["strategy_id"]
-    scenario = normalized.get("scenario") or {}
-    question = str(scenario.get("query", execution_record.get("question", "")))
-    documents = execution_record.get("documents") or assign_document_ids(
-        flatten_scenario_documents(scenario)
-    )
-    prompt = build_execution_prompt(question, documents, strategy_id)
+    valid_strategies = [strategy_id for strategy_id in STRATEGY_ORDER if strategy_outputs[strategy_id]["correct"]]
 
-    example: dict[str, Any] = {
+    return {
         "question_id": question_id,
-        "strategy_id": strategy_id,
-        "valid_strategies": valid_strategies_by_question.get(question_id, [strategy_id]),
+        "query": question,
+        "gold_answer": gold_answer,
         "input": {
             "question": question,
             "documents": documents,
         },
         "scenario": scenario,
-        "prompt": prompt,
-        "output": {
-            "answer": normalized["answer"],
-        },
-        "execution": {
-            "answer": normalized["answer"],
-            "score": normalized["score"],
-            "correct": normalized["correct"],
-        },
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are a dataset construction assistant. Follow the assigned strategy exactly.",
-            },
-            {"role": "user", "content": prompt},
-            {"role": "assistant", "content": normalized["answer"]},
-        ],
+        "executions": strategy_outputs,
+        "valid_strategies": valid_strategies,
+        "model_name": model_name,
     }
-    if include_selection_target:
-        example["selection"] = {
-            "available_strategies": list(STRATEGY_ORDER),
-            "selected_strategy": strategy_id,
-            "answer": normalized["answer"],
-        }
-    return example
 
 
-def build_valid_strategy_index(label_records: list[dict[str, Any]]) -> dict[str, list[str]]:
-    index: dict[str, list[str]] = {}
-    for record in label_records:
-        question_id = str(record["question_id"])
-        valid_strategies = [str(item) for item in record.get("valid_strategies", [])]
-        index[question_id] = valid_strategies
-    return index
-
-
-def build_sft_dataset(
-    execution_records: list[dict[str, Any]],
-    label_records: list[dict[str, Any]] | None = None,
-    include_selection_target: bool = False,
-) -> list[dict[str, Any]]:
-    """Build SFT-ready examples from validated executions."""
-
-    valid_strategies_by_question = (
-        build_valid_strategy_index(label_records) if label_records is not None else {}
-    )
+def build_sft_examples(question_record: dict[str, Any]) -> list[dict[str, Any]]:
     examples: list[dict[str, Any]] = []
-    for execution_record in execution_records:
-        normalized = normalize_execution_record(execution_record)
-        if not normalized["correct"]:
+    question_id = str(question_record["question_id"])
+    question = str(question_record["query"])
+    documents = list(question_record["input"]["documents"])
+    scenario = question_record["scenario"]
+    valid_strategies = set(question_record["valid_strategies"])
+    executions = question_record["executions"]
+
+    for strategy_id in STRATEGY_ORDER:
+        if strategy_id not in valid_strategies:
             continue
+        execution = executions[strategy_id]
+        prompt = build_strategy_prompt(strategy_id, question, documents)
         examples.append(
-            build_sft_example_from_execution(
-                execution_record,
-                valid_strategies_by_question=valid_strategies_by_question,
-                include_selection_target=include_selection_target,
-            )
+            {
+                "question_id": question_id,
+                "strategy_id": strategy_id,
+                "valid_strategies": question_record["valid_strategies"],
+                "input": {
+                    "question": question,
+                    "documents": documents,
+                    "strategy": strategy_id,
+                },
+                "scenario": scenario,
+                "prompt": prompt,
+                "output": {
+                    "answer": execution["answer"],
+                },
+                "execution": execution,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": "You are a dataset construction assistant. Follow the assigned strategy exactly.",
+                    },
+                    {"role": "user", "content": prompt},
+                    {"role": "assistant", "content": execution["answer"]},
+                ],
+            }
         )
     return examples
 
 
-# ---------------------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------------------
-
-def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Build SFT-ready datasets from ARC scenario files.")
-    subparsers = parser.add_subparsers(dest="command", required=True)
-
-    prompts = subparsers.add_parser(
-        "prompts", help="Expand scenarios into strategy-specific execution prompts."
-    )
-    prompts.add_argument("scenarios", type=Path, help="Input scenario JSONL file.")
-    prompts.add_argument("output", type=Path, help="Output JSONL file or directory.")
-    prompts.add_argument(
-        "--by-strategy",
-        action="store_true",
-        help="Write one JSONL file per strategy inside the output directory.",
-    )
-
-    labels = subparsers.add_parser(
-        "labels", help="Aggregate execution outputs into multi-label strategy sets."
-    )
-    labels.add_argument("executions", type=Path, help="Input execution JSONL file.")
-    labels.add_argument("output", type=Path, help="Output JSONL file.")
-
-    sft = subparsers.add_parser("sft", help="Build SFT splits from execution outputs.")
-    sft.add_argument("executions", type=Path, help="Input execution JSONL file.")
-    sft.add_argument("output_dir", type=Path, help="Directory where train/validation/test JSONL files are written.")
-    sft.add_argument(
-        "--labels",
-        type=Path,
-        default=None,
-        help="Optional valid-strategies JSONL file. If omitted, labels are derived from executions.",
-    )
-    sft.add_argument("--seed", type=int, default=42)
-    sft.add_argument("--train-ratio", type=float, default=0.8)
-    sft.add_argument("--validation-ratio", type=float, default=0.1)
-    sft.add_argument("--test-ratio", type=float, default=0.1)
-    sft.add_argument(
-        "--selection-target",
-        action="store_true",
-        help="Include selection-style targets alongside the controlled execution example.",
-    )
-
-    return parser.parse_args()
+def _stable_split_bucket(question_id: str, seed: int) -> float:
+    digest = sha256(f"{seed}:{question_id}".encode("utf-8")).digest()
+    return int.from_bytes(digest[:8], "big") / float(2**64)
 
 
-def run_prompt_builder(scenarios_path: Path, output: Path, by_strategy: bool = False) -> None:
-    scenarios = load_jsonl(scenarios_path)
-    if by_strategy:
-        if output.suffix:
-            raise ValueError("--by-strategy expects an output directory, not a file path.")
-        output.mkdir(parents=True, exist_ok=True)
-        for strategy_id in STRATEGY_ORDER:
-            strategy_records = [build_execution_candidate(scenario, strategy_id) for scenario in scenarios]
-            strategy_path = output / f"{strategy_id.lower()}.jsonl"
-            count = write_jsonl(strategy_path, strategy_records)
-            LOG.info("Wrote %s prompt records to %s", count, strategy_path)
-        return
-
-    records = build_execution_candidates(scenarios)
-    count = write_jsonl(output, records)
-    LOG.info("Wrote %s prompt records to %s", count, output)
-
-
-def run_label_builder(executions_path: Path, output: Path) -> None:
-    executions = load_jsonl(executions_path)
-    labels = aggregate_valid_strategies(executions)
-    count = write_jsonl(output, labels)
-    LOG.info("Wrote %s label records to %s", count, output)
-
-
-def run_sft_builder(
-    executions_path: Path,
-    output_dir: Path,
-    labels_path: Path | None = None,
+def split_question_ids(
+    question_ids: list[str],
     seed: int = 42,
     train_ratio: float = 0.8,
     validation_ratio: float = 0.1,
     test_ratio: float = 0.1,
-    selection_target: bool = False,
-) -> None:
-    executions = load_jsonl(executions_path)
-    labels = load_jsonl(labels_path) if labels_path is not None else aggregate_valid_strategies(executions)
-    valid_strategies_by_question = build_valid_strategy_index(labels)
+) -> dict[str, list[str]]:
+    total = train_ratio + validation_ratio + test_ratio
+    if abs(total - 1.0) > 1e-6:
+        raise ValueError("Split ratios must sum to 1.0.")
+    if min(train_ratio, validation_ratio, test_ratio) < 0:
+        raise ValueError("Split ratios must be non-negative.")
 
-    correct_executions: list[dict[str, Any]] = []
-    for record in executions:
-        normalized = normalize_execution_record(record)
-        if normalized["correct"]:
-            correct_executions.append(normalized)
+    split_map = {"train": [], "validation": [], "test": []}
+    for question_id in sorted(set(question_ids)):
+        bucket = _stable_split_bucket(question_id, seed)
+        if bucket < train_ratio:
+            split_map["train"].append(question_id)
+        elif bucket < train_ratio + validation_ratio:
+            split_map["validation"].append(question_id)
+        else:
+            split_map["test"].append(question_id)
+    return split_map
 
-    question_ids = [record["question_id"] for record in correct_executions]
+
+# ---------------------------------------------------------------------------
+# Pipeline
+# ---------------------------------------------------------------------------
+
+
+def load_scenarios(path: Path, n_questions: int | None = None) -> list[dict[str, Any]]:
+    scenarios = load_jsonl(path)
+    if n_questions is not None:
+        scenarios = scenarios[:n_questions]
+    return scenarios
+
+
+def run_sft_pipeline(
+    scenarios_path: Path,
+    output_dir: Path,
+    model_name: str,
+    n_questions: int | None = None,
+    seed: int = 42,
+    train_ratio: float = 0.8,
+    validation_ratio: float = 0.1,
+    test_ratio: float = 0.1,
+    temperature: float = 0.8,
+    max_new_tokens: int = 256,
+) -> dict[str, Any]:
+    scenarios = load_scenarios(scenarios_path, n_questions=n_questions)
+    runner = StrategyRunner(model_name=model_name, temperature=temperature, max_new_tokens=max_new_tokens)
+
+    question_records: list[dict[str, Any]] = []
+    for index, scenario in enumerate(scenarios, start=1):
+        question_id = str(scenario.get("query_id", f"question_{index}"))
+        question = str(scenario.get("query", ""))
+        gold_answer = str(scenario.get("gold_answer", ""))
+        documents = assign_document_ids(flatten_scenario_documents(scenario))
+        LOG.info("Processing question: question_id=%s strategy_count=%s", question_id, len(STRATEGY_ORDER))
+
+        strategy_outputs: dict[str, dict[str, Any]] = {}
+        for strategy_id in STRATEGY_ORDER:
+            prompt = build_strategy_prompt(strategy_id, question, documents)
+            answer = runner.generate(prompt)
+            correct = is_correct_response(answer, gold_answer, strategy_id)
+            strategy_outputs[strategy_id] = {
+                "strategy_id": strategy_id,
+                "prompt": prompt,
+                "answer": answer,
+                "correct": correct,
+                "score": 1.0 if correct else 0.0,
+                "gold_answer": gold_answer,
+            }
+            LOG.info(
+                "Strategy evaluated: question_id=%s strategy_id=%s correct=%s preview=%r",
+                question_id,
+                strategy_id,
+                correct,
+                answer[:80],
+            )
+
+        question_records.append(build_question_record(scenario, strategy_outputs, model_name=model_name))
+
+    question_ids = [record["question_id"] for record in question_records]
     split_map = split_question_ids(
         question_ids,
         seed=seed,
@@ -617,51 +554,83 @@ def run_sft_builder(
     }
 
     split_examples: dict[str, list[dict[str, Any]]] = {"train": [], "validation": [], "test": []}
-    for execution_record in executions:
-        normalized = normalize_execution_record(execution_record)
-        if not normalized["correct"]:
-            continue
-        split_name = question_to_split.get(normalized["question_id"])
-        if split_name is None:
-            continue
-        split_examples[split_name].append(
-            build_sft_example_from_execution(
-                execution_record,
-                valid_strategies_by_question=valid_strategies_by_question,
-                include_selection_target=selection_target,
-            )
-        )
+    for question_record in question_records:
+        split_name = question_to_split[question_record["question_id"]]
+        split_examples[split_name].extend(build_sft_examples(question_record))
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    for split_name, records in split_examples.items():
-        split_path = output_dir / f"{split_name}.jsonl"
-        count = write_jsonl(split_path, records)
-        LOG.info("Wrote %s SFT records to %s", count, split_path)
+    write_jsonl(output_dir / "questions.jsonl", question_records)
+    write_jsonl(output_dir / "valid_strategies.jsonl", question_records)
+    for split_name, examples in split_examples.items():
+        write_jsonl(output_dir / f"{split_name}.jsonl", examples)
 
-    labels_path_out = output_dir / "valid_strategies.jsonl"
-    labels_count = write_jsonl(labels_path_out, labels)
-    LOG.info("Wrote %s label records to %s", labels_count, labels_path_out)
+    summary = {
+        "scenarios": len(question_records),
+        "train_examples": len(split_examples["train"]),
+        "validation_examples": len(split_examples["validation"]),
+        "test_examples": len(split_examples["test"]),
+        "questions_with_at_least_one_valid_strategy": sum(1 for record in question_records if record["valid_strategies"]),
+    }
+    LOG.info(
+        "SFT pipeline finished: scenarios=%s train=%s validation=%s test=%s",
+        summary["scenarios"],
+        summary["train_examples"],
+        summary["validation_examples"],
+        summary["test_examples"],
+    )
+    return summary
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Build the SFT dataset by executing 8 strategies per scenario.")
+    parser.add_argument("scenarios", type=Path, help="Input scenario JSONL file.")
+    parser.add_argument("output_dir", type=Path, help="Output directory for SFT artifacts.")
+    parser.add_argument("--n-questions", type=int, default=None, help="Optional limit on the number of scenarios.")
+    parser.add_argument("--model", default=None, help="Model name to use for execution. Defaults to PKE_MODEL.")
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--train-ratio", type=float, default=0.8)
+    parser.add_argument("--validation-ratio", type=float, default=0.1)
+    parser.add_argument("--test-ratio", type=float, default=0.1)
+    parser.add_argument("--temperature", type=float, default=None)
+    parser.add_argument("--max-new-tokens", type=int, default=None)
+    parser.add_argument("--log-level", default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    if args.command == "prompts":
-        run_prompt_builder(args.scenarios, args.output, by_strategy=args.by_strategy)
-    elif args.command == "labels":
-        run_label_builder(args.executions, args.output)
-    elif args.command == "sft":
-        run_sft_builder(
-            args.executions,
-            args.output_dir,
-            labels_path=args.labels,
-            seed=args.seed,
-            train_ratio=args.train_ratio,
-            validation_ratio=args.validation_ratio,
-            test_ratio=args.test_ratio,
-            selection_target=args.selection_target,
-        )
-    else:  # pragma: no cover - argparse prevents this
-        raise ValueError(f"Unknown command: {args.command}")
+    logging.basicConfig(level=getattr(logging, args.log_level), format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+    from .config import load_config
+
+    config = load_config()
+    model_name = args.model or config.pke_model
+    temperature = args.temperature if args.temperature is not None else config.pke_temperature
+    max_new_tokens = args.max_new_tokens if args.max_new_tokens is not None else config.pke_max_new_tokens
+
+    LOG.info(
+        "Starting SFT construction: scenarios=%s output_dir=%s model=%s",
+        args.scenarios,
+        args.output_dir,
+        model_name,
+    )
+    run_sft_pipeline(
+        scenarios_path=args.scenarios,
+        output_dir=args.output_dir,
+        model_name=model_name,
+        n_questions=args.n_questions,
+        seed=args.seed,
+        train_ratio=args.train_ratio,
+        validation_ratio=args.validation_ratio,
+        test_ratio=args.test_ratio,
+        temperature=temperature,
+        max_new_tokens=max_new_tokens,
+    )
 
 
 if __name__ == "__main__":
