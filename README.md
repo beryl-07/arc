@@ -1,8 +1,6 @@
 # ARC Phase 1 Conflict Pipeline
 
-This workspace turns the original notebook
-`phase1_conflict_pipeline (1).ipynb` into a reusable Python project for Phase 1
-of the methodology:
+This workspace is a reusable Python project for Phase 1 of the methodology:
 
 1. retrieve biomedical contexts with MedRAG retrievers,
 2. estimate parametric knowledge through repeated LLM probes,
@@ -31,12 +29,14 @@ of the methodology:
     +-- nli.py              # NLI model wrapper
     +-- pipeline.py         # end-to-end scenario builders
     +-- pke.py              # parametric knowledge estimation
+    +-- sft_dataset.py      # SFT prompt, label, and split construction helpers
     +-- retrieval.py        # MedRAG retrieval manager
     +-- utils.py            # JSONL helpers
 ```
 
 ```text
 +-- notebooks/
+    +-- run_sft_dataset_from_gitlab.ipynb
     +-- run_mmlu_med_from_gitlab.ipynb
     +-- run_medqa_us_from_gitlab.ipynb
     +-- run_medmcqa_from_gitlab.ipynb
@@ -116,6 +116,23 @@ Run MedMCQA (default split: `validation`, as `test` labels are private):
 python -m src.cli --prepare-statpearls --dataset medmcqa --split validation --n-questions 10 --output medmcqa_scenarios.jsonl
 ```
 
+Summarize mutually exclusive question sets from a generated JSONL dataset:
+
+```bash
+python -m src.summarize_conflicts /path/to/scenarios.jsonl
+```
+
+The unit is the question. A question is counted once in exactly one exclusive
+set, for example `NO_CONFLICT`, `IC`, `CM`, `IM`, `CM_IC`, `IC_IM`,
+`CM_IC_IM`. The script also prints a secondary non-exclusive view showing how
+many questions contain each conflict type at least once.
+
+For machine-readable output:
+
+```bash
+python -m src.summarize_conflicts /path/to/scenarios.jsonl --json
+```
+
 In Colab, add `--mount-drive` if you want the runner to mount Google Drive:
 
 ```bash
@@ -129,6 +146,44 @@ right working directory before retriever initialization:
 ```bash
 python -m src.cli --prepare-statpearls --dataset pubmedqa --n-questions 10
 ```
+
+## SFT Dataset Construction
+
+The SFT stage is built from the scenario JSONL files and strategy executions.
+The helper module keeps the question-level split fixed before any strategy
+augmentation.
+
+Generate one controlled-execution prompt per strategy:
+
+```bash
+python -m src.sft_dataset prompts data/mmlu_med_scenarios.jsonl data/sft/prompts.jsonl
+```
+
+Write one prompt file per strategy:
+
+```bash
+python -m src.sft_dataset prompts data/mmlu_med_scenarios.jsonl data/sft/prompts --by-strategy
+```
+
+Aggregate execution outputs into multi-label strategy sets:
+
+```bash
+python -m src.sft_dataset labels data/sft/executions.jsonl data/sft/valid_strategies.jsonl
+```
+
+Build train/validation/test SFT splits from validated executions:
+
+```bash
+python -m src.sft_dataset sft data/sft/executions.jsonl data/sft \
+  --labels data/sft/valid_strategies.jsonl
+```
+
+The resulting JSONL records keep the `question_id`, `strategy_id`, the
+scenario/question context, the raw execution output, and the correctness score
+so the labels can be regenerated without rerunning the model.
+
+The notebook runner is available at
+[notebooks/run_sft_dataset_from_gitlab.ipynb](/home/beryl/Documents/M2-IMSP/master-thesis/ARC/notebooks/run_sft_dataset_from_gitlab.ipynb).
 
 ## Output Schema
 
