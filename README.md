@@ -29,7 +29,7 @@ This workspace is a reusable Python project for Phase 1 of the methodology:
     +-- nli.py              # NLI model wrapper
     +-- pipeline.py         # end-to-end scenario builders
     +-- pke.py              # parametric knowledge estimation
-    +-- sft_dataset.py      # SFT dataset construction pipeline
+    +-- sft_dataset.py      # stratified SFT/GRPO/validation/test split builder
     +-- retrieval.py        # MedRAG retrieval manager
     +-- utils.py            # JSONL helpers
 ```
@@ -147,31 +147,31 @@ right working directory before retriever initialization:
 python -m src.cli --prepare-statpearls --dataset pubmedqa --n-questions 10
 ```
 
-## SFT Dataset Construction
+## Stratified Split Construction
 
-The SFT pipeline runs the model once per strategy, compares each response to
-the scenario `gold_answer`, records every strategy that is correct, then splits
-the resulting question-level records before expanding them into SFT examples.
+The split builder reads a `scenarios.jsonl` file, computes a normalized
+`conflict_category` for each `query_id`, and produces four disjoint files:
+`sft_train.jsonl`, `grpo_train.jsonl`, `val.jsonl`, and `test.jsonl`.
+
+The global split is stratified at 80/10/10 by `conflict_category`. The train
+set is then split again into SFT and GRPO, keeping all `sans_conflit` samples
+inside SFT and sampling the remaining SFT budget proportionally with a minimum
+of 20 examples per conflict category.
 
 Run it from the repository root:
 
 ```bash
-python -m src.sft_dataset data/mmlu_med_scenarios.jsonl outputs/sft
+python -m src.sft_dataset data/scenarios_merged.jsonl --output-dir data
 ```
 
 The command writes:
 
 ```text
-outputs/sft/questions.jsonl
-outputs/sft/valid_strategies.jsonl
-outputs/sft/train.jsonl
-outputs/sft/validation.jsonl
-outputs/sft/test.jsonl
+data/sft_train.jsonl
+data/grpo_train.jsonl
+data/val.jsonl
+data/test.jsonl
 ```
-
-Each question record keeps the original scenario, the raw answer from all eight
-strategies, and `valid_strategies` with only the strategies that matched the
-gold answer.
 
 The notebook runner is available at
 [notebooks/run_sft_dataset_from_gitlab.ipynb](/home/beryl/Documents/M2-IMSP/master-thesis/ARC/notebooks/run_sft_dataset_from_gitlab.ipynb).

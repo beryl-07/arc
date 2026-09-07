@@ -2,8 +2,10 @@ accelerate
 datasets
 faiss-cpu
 huggingface_hub
+pandas
 pillow<12
 pyserini
+scikit-learn
 sentence-transformers
 torch
 tqdm
