@@ -416,21 +416,68 @@ def parse_options(query: str) -> dict[str, str]:
     return options
 
 
+def extract_answer_letter_from_query(query: str, gold_answer: Any) -> str | None:
+    """Infer a choice letter by matching the gold answer text against options."""
+
+    if not isinstance(gold_answer, str):
+        return None
+
+    normalized_gold = normalize_text(gold_answer)
+    if not normalized_gold:
+        return None
+
+    options = parse_options(query)
+    for letter, option_text in options.items():
+        if normalize_text(option_text) == normalized_gold:
+            return letter
+    return None
+
+
+def get_gold_letter(question_data: dict[str, Any]) -> str | None:
+    """Extract the gold letter from either string or list gold-answer formats."""
+
+    gold_answer = question_data.get("gold_answer", "")
+
+    if isinstance(gold_answer, list):
+        if not gold_answer:
+            return None
+        first = str(gold_answer[0]).strip().upper()
+        return first or None
+
+    if isinstance(gold_answer, str):
+        letters = extract_choice_letters(gold_answer)
+        if letters:
+            return letters[0]
+
+    return extract_answer_letter_from_query(
+        str(question_data.get("query", "")),
+        gold_answer,
+    )
+
+
 def resolve_gold_reference(record: dict[str, Any]) -> tuple[str | None, str, bool]:
-    raw_gold = str(record.get("gold_answer", "")).strip()
+    gold_answer = record.get("gold_answer", "")
+    gold_letter = get_gold_letter(record)
+
+    if isinstance(gold_answer, list):
+        raw_gold = " ".join(str(item).strip() for item in gold_answer if str(item).strip())
+    else:
+        raw_gold = str(gold_answer).strip()
+
     if normalize_text(raw_gold) == normalize_text("ABSTENTION"):
         return None, raw_gold, True
 
-    if re.fullmatch(r"[ABCD]", raw_gold.upper()):
-        return raw_gold.upper(), raw_gold.upper(), False
+    if gold_letter and re.fullmatch(r"[ABCD]", gold_letter.upper()):
+        return gold_letter.upper(), raw_gold or gold_letter.upper(), False
 
-    query = str(record.get("query", ""))
-    options = parse_options(query)
-    normalized_gold = normalize_text(raw_gold)
-    for letter, option_text in options.items():
-        normalized_option = normalize_text(option_text)
-        if normalized_gold == normalized_option:
-            return letter, option_text, False
+    if isinstance(gold_answer, str):
+        query = str(record.get("query", ""))
+        options = parse_options(query)
+        normalized_gold = normalize_text(raw_gold)
+        for letter, option_text in options.items():
+            normalized_option = normalize_text(option_text)
+            if normalized_gold == normalized_option:
+                return letter, option_text, False
 
     return None, raw_gold, False
 
