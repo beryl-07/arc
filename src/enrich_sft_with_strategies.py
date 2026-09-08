@@ -559,6 +559,7 @@ def enrich_records(
     output_path: Path,
     start_index: int,
     batch_size: int,
+    save_executions: bool,
 ) -> list[dict[str, Any]]:
     processed: list[dict[str, Any]] = []
     total = len(records)
@@ -593,6 +594,8 @@ def enrich_records(
 
                 for payload in batch_payloads:
                     payload["valid_strategies"] = []
+                    if save_executions:
+                        payload["executions"] = {}
 
                 for response, (payload_index, strategy_id) in zip(responses, batch_meta, strict=False):
                     payload = batch_payloads[payload_index]
@@ -617,9 +620,17 @@ def enrich_records(
                     if is_correct:
                         payload["valid_strategies"].append(strategy_id)
 
+                    if save_executions:
+                        payload["executions"][strategy_id] = {
+                            "response": response,
+                            "correct": is_correct,
+                        }
+
                 for payload in batch_payloads:
                     enriched = dict(payload["record"])
                     enriched["valid_strategies"] = payload["valid_strategies"]
+                    if save_executions:
+                        enriched["executions"] = payload["executions"]
                     processed.append(enriched)
                     handle.write(json.dumps(enriched, ensure_ascii=False) + "\n")
                     handle.flush()
@@ -673,6 +684,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-document-chars", type=int, default=DEFAULT_MAX_DOCUMENT_CHARS)
     parser.add_argument("--max-total-document-chars", type=int, default=DEFAULT_MAX_TOTAL_DOCUMENT_CHARS)
     parser.add_argument("--question-batch-size", type=int, default=DEFAULT_QUESTION_BATCH_SIZE)
+    parser.add_argument(
+        "--save-executions",
+        action="store_true",
+        help="Save the raw generated response for each strategy in an 'executions' field.",
+    )
     parser.add_argument(
         "--overwrite",
         action="store_true",
@@ -731,6 +747,7 @@ def main() -> None:
         output_path=output_path,
         start_index=start_index,
         batch_size=max(1, args.question_batch_size),
+        save_executions=args.save_executions,
     )
 
     if start_index > 0:
