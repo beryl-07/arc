@@ -28,7 +28,7 @@ STRATEGY_ORDER = ("S1", "S2", "S3", "S4", "S5", "S6", "S7", "S8")
 DEFAULT_MODEL_NAME = "Qwen/Qwen2.5-3B-Instruct"
 DEFAULT_INPUT_PATH = Path("data/sft_train.jsonl")
 DEFAULT_OUTPUT_PATH = Path("data/enriched_sft_train.jsonl")
-DEFAULT_MAX_NEW_TOKENS = 64
+DEFAULT_MAX_NEW_TOKENS = 256
 DEFAULT_MAX_INPUT_TOKENS = 4096
 DEFAULT_MAX_DOCUMENT_CHARS = 1200
 DEFAULT_MAX_TOTAL_DOCUMENT_CHARS = 6000
@@ -55,10 +55,14 @@ Target question:
 {question}
 
 Apply Strategy S1 to resolve any conflict between the reference documents and the model's internal knowledge.
-Determine which information is the most accurate and reliable, and use it to answer the question.
-Output only a short answer, usually a phrase without explanation.
+Determine which information is the most accurate and reliable.
 
-Answer:""",
+**Output your answer in EXACTLY this JSON format (no extra text, no markdown):**
+{{
+    "strategy": "S1",
+    "response": "A",
+    "justification": "Brief explanation of why this information is the most accurate."
+}}""",
     ),
     StrategySpec(
         "S2",
@@ -70,11 +74,14 @@ Reference documents:
 Target question:
 {question}
 
-Apply Strategy S2.
-When the reference documents and internal knowledge conflict, prioritize the information contained in the reference documents.
-Output only a short answer, usually a phrase without explanation.
+Apply Strategy S2. When the reference documents and internal knowledge conflict, prioritize the information contained in the reference documents.
 
-Answer:""",
+**Output your answer in EXACTLY this JSON format (no extra text, no markdown):**
+{{
+    "strategy": "S2",
+    "response": "A",
+    "justification": "Brief explanation of why the documents are prioritized over internal knowledge."
+}}""",
     ),
     StrategySpec(
         "S3",
@@ -86,20 +93,19 @@ Reference documents:
 Target question:
 {question}
 
-Apply Strategy S3.
-Provide two short answers:
-1. one based on the reference documents;
-2. one based on the model's internal knowledge.
+Apply Strategy S3. Provide two answers: 1. based on documents; 2. based on internal knowledge.
 
-Keep the two answers distinct.
-Output only the two short answers, without explanation.
-
-Answers:""",
+**Output your answer in EXACTLY this JSON format (no extra text, no markdown):**
+{{
+    "strategy": "S3",
+    "response": ["A", "B"],
+    "justification": "Brief explanation of the two sources."
+}}""",
         expects_multiple_answers=True,
     ),
     StrategySpec(
         "S4",
-        """You are resolving a knowledge conflict using Strategy S4: Identifying Correct Information.
+        """You are resolving a knowledge conflict using Strategy S4: Identifying Correct Information Among Documents.
 
 Reference documents:
 {documents}
@@ -108,10 +114,13 @@ Target question:
 {question}
 
 Apply Strategy S4 to resolve conflicts among the reference documents.
-Determine which information is the most accurate and reliable among the conflicting documents, and use it to answer the question.
-Output only a short answer, usually a phrase without explanation.
 
-Answer:""",
+**Output your answer in EXACTLY this JSON format (no extra text, no markdown):**
+{{
+    "strategy": "S4",
+    "response": "A",
+    "justification": "Brief explanation of why this document is the most reliable."
+}}""",
     ),
     StrategySpec(
         "S5",
@@ -123,15 +132,18 @@ Reference documents:
 Target question:
 {question}
 
-Apply Strategy S5.
-When the reference documents contain conflicting information, identify which information appears most frequently and prioritize it when answering.
-Output only a short answer, usually a phrase without explanation.
+Apply Strategy S5. When documents conflict, identify which information appears most frequently.
 
-Answer:""",
+**Output your answer in EXACTLY this JSON format (no extra text, no markdown):**
+{{
+    "strategy": "S5",
+    "response": "A",
+    "justification": "Brief explanation of the frequency pattern found in the documents."
+}}""",
     ),
     StrategySpec(
         "S6",
-        """You are resolving a knowledge conflict using Strategy S6: Generating Corresponding Responses Respectively.
+        """You are resolving a knowledge conflict using Strategy S6: Generating Corresponding Responses from Conflicting Documents.
 
 Reference documents:
 {documents}
@@ -139,16 +151,19 @@ Reference documents:
 Target question:
 {question}
 
-Apply Strategy S6.
-If the reference documents contain conflicting information, provide a separate short answer corresponding to each conflicting position found in the documents.
-Output only the short answers, without explanation.
+Apply Strategy S6. Provide a separate answer for each conflicting position found in the documents.
 
-Answers:""",
+**Output your answer in EXACTLY this JSON format (no extra text, no markdown):**
+{{
+    "strategy": "S6",
+    "response": ["A", "C"],
+    "justification": "Brief explanation of the conflicting positions."
+}}""",
         expects_multiple_answers=True,
     ),
     StrategySpec(
         "S7",
-        """You are resolving a knowledge conflict using Strategy S7: Prioritizing External Knowledge.
+        """You are resolving a knowledge conflict using Strategy S7: Prioritizing External Knowledge with Abstention.
 
 Reference documents:
 {documents}
@@ -156,13 +171,14 @@ Reference documents:
 Target question:
 {question}
 
-Apply Strategy S7.
-Answer the question using the reference documents.
-If the reference documents do not contain sufficient information to answer the question, output exactly:
-"The documents cannot answer this question."
-Output only the answer.
+Apply Strategy S7. Answer using documents. If insufficient, output exactly "ABSTENTION" in the response field.
 
-Answer:""",
+**Output your answer in EXACTLY this JSON format (no extra text, no markdown):**
+{{
+    "strategy": "S7",
+    "response": "A",
+    "justification": "Brief explanation of the documents' sufficiency or insufficiency."
+}}""",
         can_abstain=True,
     ),
     StrategySpec(
@@ -175,12 +191,14 @@ Reference documents:
 Target question:
 {question}
 
-Apply Strategy S8.
-Use the reference documents to answer the question when they contain relevant information.
-If the reference documents do not contain the relevant information, use the model's internal knowledge instead.
-Output only a short answer, usually a phrase without explanation.
+Apply Strategy S8. Use documents if they contain relevant info, otherwise fallback to internal knowledge.
 
-Answer:""",
+**Output your answer in EXACTLY this JSON format (no extra text, no markdown):**
+{{
+    "strategy": "S8",
+    "response": "A",
+    "justification": "Brief explanation of why documents or internal knowledge was used."
+}}""",
     ),
 )
 
@@ -482,6 +500,60 @@ def resolve_gold_reference(record: dict[str, Any]) -> tuple[str | None, str, boo
     return None, raw_gold, False
 
 
+def parse_structured_response(text):
+    """Try to parse a JSON-structured model response.
+
+    Returns a tuple ``(extracted_response, was_json_parsed)`` where
+    *extracted_response* is the value of the ``"response"`` field when JSON
+    was successfully parsed, or the original *text* otherwise.
+    """
+    cleaned = text.strip()
+    # Strip markdown code fences if present
+    if cleaned.startswith("```"):
+        fence_lines = cleaned.split("\n")
+        inner = []
+        in_block = False
+        for ln in fence_lines:
+            if ln.strip().startswith("```") and not in_block:
+                in_block = True
+                continue
+            if ln.strip() == "```" and in_block:
+                break
+            if in_block:
+                inner.append(ln)
+        if inner:
+            cleaned = "\n".join(inner).strip()
+
+    # Direct JSON parse
+    try:
+        data = json.loads(cleaned)
+        if isinstance(data, dict) and "response" in data:
+            return data["response"], True
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Try to locate a JSON object containing "response" in surrounding text
+    match = re.search(r'\{[^{}]*"response"\s*:', cleaned)
+    if match:
+        start_pos = match.start()
+        brace_depth = 0
+        for i in range(start_pos, len(cleaned)):
+            if cleaned[i] == "{":
+                brace_depth += 1
+            elif cleaned[i] == "}":
+                brace_depth -= 1
+                if brace_depth == 0:
+                    try:
+                        data = json.loads(cleaned[start_pos : i + 1])
+                        if isinstance(data, dict) and "response" in data:
+                            return data["response"], True
+                    except (json.JSONDecodeError, ValueError):
+                        pass
+                    break
+
+    return text, False
+
+
 def extract_choice_letters(text: str) -> list[str]:
     """Extract explicit multiple-choice letters from a model response.
 
@@ -489,6 +561,21 @@ def extract_choice_letters(text: str) -> list[str]:
     clearly formatted as a choice label or a short labeled answer. This avoids
     treating ordinary prose like "A patient..." as a valid answer.
     """
+
+
+    # Try JSON-structured response first
+    parsed, is_json = parse_structured_response(text)
+    if is_json:
+        if isinstance(parsed, list):
+            return [
+                str(x).strip().upper()
+                for x in parsed
+                if re.fullmatch(r'[ABCD]', str(x).strip().upper())
+            ]
+        parsed_str = str(parsed).strip().upper()
+        if re.fullmatch(r'[ABCD]', parsed_str):
+            return [parsed_str]
+        return []
 
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if not lines:
@@ -536,8 +623,12 @@ def evaluate_response(
     gold_text: str,
     gold_is_abstention: bool,
 ) -> bool:
-    if strategy_id == "S7" and ABSTENTION_PHRASE in response:
-        return gold_is_abstention
+    if strategy_id == "S7":
+        parsed, is_json = parse_structured_response(response)
+        if is_json and isinstance(parsed, str) and parsed.strip().upper() == "ABSTENTION":
+            return gold_is_abstention
+        if ABSTENTION_PHRASE in response or "ABSTENTION" in response.upper():
+            return gold_is_abstention
 
     if strategy_id in {"S3", "S6"}:
         if gold_letter and gold_letter in extract_choice_letters(response):
