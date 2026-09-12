@@ -72,6 +72,57 @@ def _sft_eval_strategy_kwargs(save_steps: int) -> dict[str, object]:
     return kwargs
 
 
+def _filter_init_kwargs(cls: type, kwargs: dict[str, object]) -> dict[str, object]:
+    """Garde uniquement les arguments acceptés par la version installée."""
+
+    signature = inspect.signature(cls.__init__)
+    parameters = signature.parameters
+    if any(parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()):
+        return kwargs
+    return {key: value for key, value in kwargs.items() if key in parameters}
+
+
+def _sft_length_kwargs(max_length: int) -> dict[str, object]:
+    """Adapte le nom de longueur selon la version TRL."""
+
+    parameters = inspect.signature(SFTConfig.__init__).parameters
+    if "max_length" in parameters:
+        return {"max_length": max_length}
+    if "max_seq_length" in parameters:
+        return {"max_seq_length": max_length}
+    return {}
+
+
+def _build_sft_trainer(
+    model,
+    tokenizer,
+    training_args: SFTConfig,
+    train_dataset: Dataset,
+    val_dataset: Dataset,
+    formatting_func,
+) -> SFTTrainer:
+    """Construit SFTTrainer avec le nom tokenizer/processing_class disponible."""
+
+    kwargs = {
+        "model": model,
+        "args": training_args,
+        "train_dataset": train_dataset,
+        "eval_dataset": val_dataset,
+        "formatting_func": formatting_func,
+    }
+    parameters = inspect.signature(SFTTrainer.__init__).parameters
+    if "processing_class" in parameters:
+        kwargs["processing_class"] = tokenizer
+    elif "tokenizer" in parameters:
+        kwargs["tokenizer"] = tokenizer
+    else:
+        raise RuntimeError(
+            "This TRL version exposes neither processing_class nor tokenizer "
+            "in SFTTrainer; cannot pass the tokenizer safely."
+        )
+    return SFTTrainer(**_filter_init_kwargs(SFTTrainer, kwargs))
+
+
 def main() -> None:
     args = parse_args()
     os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
@@ -127,38 +178,39 @@ def main() -> None:
             return [tokenizer.apply_chat_template(item, tokenize=False, add_generation_prompt=False) for item in messages]
         return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
 
-    training_args = SFTConfig(
-        output_dir=str(args.output_dir),
-        num_train_epochs=args.epochs,
-        per_device_train_batch_size=args.per_device_train_batch_size,
-        gradient_accumulation_steps=args.gradient_accumulation_steps,
-        learning_rate=args.learning_rate,
-        lr_scheduler_type="cosine",
-        warmup_ratio=0.05,
-        fp16=args.fp16,
-        bf16=args.bf16,
-        logging_steps=args.logging_steps,
-        save_strategy="steps",
-        save_steps=args.save_steps,
-        save_total_limit=2,
+    sft_config_kwargs = {
+        "output_dir": str(args.output_dir),
+        "num_train_epochs": args.epochs,
+        "per_device_train_batch_size": args.per_device_train_batch_size,
+        "gradient_accumulation_steps": args.gradient_accumulation_steps,
+        "learning_rate": args.learning_rate,
+        "lr_scheduler_type": "cosine",
+        "warmup_ratio": 0.05,
+        "fp16": args.fp16,
+        "bf16": args.bf16,
+        "logging_steps": args.logging_steps,
+        "save_strategy": "steps",
+        "save_steps": args.save_steps,
+        "save_total_limit": 2,
         **_sft_eval_strategy_kwargs(args.save_steps),
-        report_to="none",
-        gradient_checkpointing=True,
-        gradient_checkpointing_kwargs={"use_reentrant": False},
-        optim="paged_adamw_8bit",
-        dataloader_pin_memory=False,
-        max_length=args.max_length,
-        packing=False,
-        dataset_num_proc=2,
-        max_grad_norm=1.0,
-        seed=args.seed,
-    )
-    trainer = SFTTrainer(
+        "report_to": "none",
+        "gradient_checkpointing": True,
+        "gradient_checkpointing_kwargs": {"use_reentrant": False},
+        "optim": "paged_adamw_8bit",
+        "dataloader_pin_memory": False,
+        **_sft_length_kwargs(args.max_length),
+        "packing": False,
+        "dataset_num_proc": 2,
+        "max_grad_norm": 1.0,
+        "seed": args.seed,
+    }
+    training_args = SFTConfig(**_filter_init_kwargs(SFTConfig, sft_config_kwargs))
+    trainer = _build_sft_trainer(
         model=model,
-        processing_class=tokenizer,
-        args=training_args,
+        tokenizer=tokenizer,
+        training_args=training_args,
         train_dataset=train_dataset,
-        eval_dataset=val_dataset,
+        val_dataset=val_dataset,
         formatting_func=format_chat,
     )
 
