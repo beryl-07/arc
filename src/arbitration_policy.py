@@ -155,5 +155,37 @@ def extract_gold_letters(gold_answer: Any) -> set[str]:
 def exact_letter_reward(completions: list[Any], gold_answer: list[Any], **_: Any) -> list[float]:
     rewards: list[float] = []
     for completion, gold in zip(completions, gold_answer):
-        rewards.append(1.0 if extract_response_letters(completion) & extract_gold_letters(gold) else 0.0)
+        rewards.append(1.0 if extract_response_letters(completion) == extract_gold_letters(gold) else 0.0)
     return rewards
+
+
+def compute_multilabel_metrics(
+    predicted_sets: list[set[str]],
+    gold_sets: list[set[str]],
+    classes: list[str] | None = None,
+) -> dict[str, float]:
+    """Calcule les métriques multilabel avec égalité exacte des ensembles."""
+
+    from sklearn.metrics import f1_score, precision_score, recall_score
+    from sklearn.preprocessing import MultiLabelBinarizer
+
+    labels = classes or ["A", "B", "C", "D"]
+    mlb = MultiLabelBinarizer(classes=labels)
+    y_true = mlb.fit_transform([sorted(items) for items in gold_sets])
+    y_pred = mlb.transform([sorted(items) for items in predicted_sets])
+    n_examples = len(gold_sets)
+    subset_accuracy = (
+        sum(predicted == gold for predicted, gold in zip(predicted_sets, gold_sets)) / n_examples
+        if n_examples
+        else 0.0
+    )
+    empty_prediction_rate = (
+        sum(1 for predicted in predicted_sets if not predicted) / n_examples if n_examples else 0.0
+    )
+    return {
+        "subset_accuracy": float(subset_accuracy),
+        "macro_f1": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
+        "macro_precision": float(precision_score(y_true, y_pred, average="macro", zero_division=0)),
+        "macro_recall": float(recall_score(y_true, y_pred, average="macro", zero_division=0)),
+        "empty_prediction_rate": float(empty_prediction_rate),
+    }

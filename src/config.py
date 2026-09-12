@@ -37,6 +37,11 @@ def _bool_env(name: str, default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
 
+def _optional_path_env(name: str, default: str | None = None) -> Path | None:
+    value = os.getenv(name, default)
+    return Path(value) if value else None
+
+
 @dataclass(frozen=True)
 class PipelineConfig:
     """Runtime settings with Colab-compatible defaults.
@@ -123,6 +128,84 @@ def load_config() -> PipelineConfig:
 
 CONFIG = load_config()
 
+
+@dataclass(frozen=True)
+class ArbitrationTrainingConfig:
+    """Configuration centrale du pipeline SFT / GRPO / évaluation."""
+
+    # =========================
+    # Configuration SFT
+    # =========================
+    sft_num_epochs: int = int(os.getenv("SFT_NUM_EPOCHS", "3"))
+    sft_learning_rate: float = float(os.getenv("SFT_LEARNING_RATE", "2e-5"))
+    sft_max_seq_length: int = int(os.getenv("SFT_MAX_SEQ_LENGTH", "2048"))
+    sft_save_steps: int = int(os.getenv("SFT_SAVE_STEPS", "100"))
+    # Obligatoire au lancement SFT : la valeur par défaut documente l'absence
+    # volontaire de validation implicite.
+    sft_val_path: Path | None = _optional_path_env("SFT_VAL_PATH", None)
+    sft_per_device_train_batch_size: int = int(os.getenv("SFT_PER_DEVICE_TRAIN_BATCH_SIZE", "4"))
+    sft_gradient_accumulation_steps: int = int(os.getenv("SFT_GRADIENT_ACCUMULATION_STEPS", "4"))
+    sft_logging_steps: int = int(os.getenv("SFT_LOGGING_STEPS", "10"))
+    lora_r: int = int(os.getenv("LORA_R", "16"))
+    lora_alpha: int = int(os.getenv("LORA_ALPHA", "32"))
+    lora_dropout: float = float(os.getenv("LORA_DROPOUT", "0.05"))
+    lora_target_modules: list[str] = field(
+        default_factory=lambda: _csv_env("LORA_TARGET_MODULES", ["q_proj", "k_proj", "v_proj", "o_proj"])
+    )
+
+    # =========================
+    # Configuration GRPO
+    # =========================
+    grpo_num_generations: int = int(os.getenv("GRPO_NUM_GENERATIONS", "8"))
+    # 50 est un point de départ expérimental, pas une valeur optimale. Si le
+    # coût calcul le permet, comparer ensuite avec 80 steps.
+    grpo_max_steps: int = int(os.getenv("GRPO_MAX_STEPS", "50"))
+    grpo_learning_rate: float = float(os.getenv("GRPO_LEARNING_RATE", "1e-6"))
+    grpo_beta: float = float(os.getenv("GRPO_BETA", "0.01"))
+    grpo_max_completion_length: int = int(os.getenv("GRPO_MAX_COMPLETION_LENGTH", "128"))
+    grpo_per_device_batch_size: int = int(os.getenv("GRPO_PER_DEVICE_BATCH_SIZE", "1"))
+    grpo_gradient_accumulation_steps: int = int(os.getenv("GRPO_GRADIENT_ACCUMULATION_STEPS", "8"))
+    grpo_save_steps: int = int(os.getenv("GRPO_SAVE_STEPS", "50"))
+    grpo_logging_steps: int = int(os.getenv("GRPO_LOGGING_STEPS", "5"))
+
+    # =========================
+    # Évaluation
+    # =========================
+    eval_multilabel: bool = _bool_env("EVAL_MULTILABEL", True)
+
+    model_name: str = os.getenv("ARBITRATION_MODEL_NAME", "Qwen/Qwen2.5-3B-Instruct")
+    sft_train_path: Path = Path(os.getenv("SFT_TRAIN_PATH", "data/sft_execution_data.jsonl"))
+    grpo_train_path: Path = Path(os.getenv("GRPO_TRAIN_PATH", "data/grpo_train.jsonl"))
+    val_path: Path = Path(os.getenv("ARBITRATION_VAL_PATH", "data/val.jsonl"))
+    test_path: Path = Path(os.getenv("ARBITRATION_TEST_PATH", "data/test.jsonl"))
+    sft_output_dir: Path = Path(os.getenv("SFT_OUTPUT_DIR", "models/sft_arbitration_policy"))
+    grpo_output_dir: Path = Path(os.getenv("GRPO_OUTPUT_DIR", "models/grpo_arbitration_policy"))
+    outputs_dir: Path = Path(os.getenv("ARBITRATION_OUTPUTS_DIR", "outputs"))
+    eval_max_input_length: int = int(os.getenv("EVAL_MAX_INPUT_LENGTH", "2048"))
+    eval_max_new_tokens: int = int(os.getenv("EVAL_MAX_NEW_TOKENS", "128"))
+    max_document_chars: int = int(os.getenv("ARBITRATION_MAX_DOCUMENT_CHARS", "600"))
+    max_total_document_chars: int = int(os.getenv("ARBITRATION_MAX_TOTAL_DOCUMENT_CHARS", "3000"))
+    seed: int = int(os.getenv("ARBITRATION_SEED", "42"))
+
+
+ARBITRATION_CONFIG = ArbitrationTrainingConfig()
+
+# Aliases explicites demandés par le cahier des charges. Ils pointent tous vers
+# la configuration centrale ci-dessus pour éviter les divergences.
+SFT_NUM_EPOCHS = ARBITRATION_CONFIG.sft_num_epochs
+SFT_LEARNING_RATE = ARBITRATION_CONFIG.sft_learning_rate
+SFT_MAX_SEQ_LENGTH = ARBITRATION_CONFIG.sft_max_seq_length
+SFT_SAVE_STEPS = ARBITRATION_CONFIG.sft_save_steps
+SFT_VAL_PATH = ARBITRATION_CONFIG.sft_val_path
+GRPO_NUM_GENERATIONS = ARBITRATION_CONFIG.grpo_num_generations
+GRPO_MAX_STEPS = ARBITRATION_CONFIG.grpo_max_steps
+GRPO_LEARNING_RATE = ARBITRATION_CONFIG.grpo_learning_rate
+GRPO_BETA = ARBITRATION_CONFIG.grpo_beta
+GRPO_MAX_COMPLETION_LENGTH = ARBITRATION_CONFIG.grpo_max_completion_length
+GRPO_PER_DEVICE_BATCH_SIZE = ARBITRATION_CONFIG.grpo_per_device_batch_size
+GRPO_GRADIENT_ACCUMULATION_STEPS = ARBITRATION_CONFIG.grpo_gradient_accumulation_steps
+EVAL_MULTILABEL = ARBITRATION_CONFIG.eval_multilabel
+
 # Backward-compatible dictionary for early notebook-style imports.
 config = {
     "_JAVA_OPTIONS": CONFIG.java_options,
@@ -146,4 +229,17 @@ config = {
     "PKE_TEMPERATURE": CONFIG.pke_temperature,
     "PKE_KNOWN_THRESH": CONFIG.pke_known_threshold,
     "DEFAULT_N_QUESTIONS": CONFIG.default_n_questions,
+    "SFT_NUM_EPOCHS": SFT_NUM_EPOCHS,
+    "SFT_LEARNING_RATE": SFT_LEARNING_RATE,
+    "SFT_MAX_SEQ_LENGTH": SFT_MAX_SEQ_LENGTH,
+    "SFT_SAVE_STEPS": SFT_SAVE_STEPS,
+    "SFT_VAL_PATH": str(SFT_VAL_PATH) if SFT_VAL_PATH else None,
+    "GRPO_NUM_GENERATIONS": GRPO_NUM_GENERATIONS,
+    "GRPO_MAX_STEPS": GRPO_MAX_STEPS,
+    "GRPO_LEARNING_RATE": GRPO_LEARNING_RATE,
+    "GRPO_BETA": GRPO_BETA,
+    "GRPO_MAX_COMPLETION_LENGTH": GRPO_MAX_COMPLETION_LENGTH,
+    "GRPO_PER_DEVICE_BATCH_SIZE": GRPO_PER_DEVICE_BATCH_SIZE,
+    "GRPO_GRADIENT_ACCUMULATION_STEPS": GRPO_GRADIENT_ACCUMULATION_STEPS,
+    "EVAL_MULTILABEL": EVAL_MULTILABEL,
 }

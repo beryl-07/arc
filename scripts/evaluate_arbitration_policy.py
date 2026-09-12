@@ -9,28 +9,38 @@ from pathlib import Path
 
 import torch
 from peft import AutoPeftModelForCausalLM
-from sklearn.metrics import accuracy_score, f1_score
 from tqdm import tqdm
 from transformers import AutoTokenizer, BitsAndBytesConfig
 
-from src.arbitration_policy import build_arbitration_prompt, extract_gold_letters, extract_response_letters, read_jsonl
+from src.arbitration_policy import (
+    build_arbitration_prompt,
+    compute_multilabel_metrics,
+    extract_gold_letters,
+    extract_response_letters,
+    read_jsonl,
+)
+from src.config import ARBITRATION_CONFIG
 
 
 def parse_args() -> argparse.Namespace:
+    cfg = ARBITRATION_CONFIG
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model-path", type=Path, default=Path("models/grpo_arbitration_policy"))
-    parser.add_argument("--data-path", type=Path, default=Path("data/val.jsonl"))
+    parser.add_argument("--model-path", type=Path, default=cfg.grpo_output_dir)
+    parser.add_argument("--data-path", type=Path, default=cfg.val_path)
     parser.add_argument("--output-path", type=Path, default=None)
     parser.add_argument("--limit", type=int, default=0)
-    parser.add_argument("--max-input-length", type=int, default=2048)
-    parser.add_argument("--max-new-tokens", type=int, default=128)
-    parser.add_argument("--max-document-chars", type=int, default=600)
-    parser.add_argument("--max-total-document-chars", type=int, default=3000)
+    parser.add_argument("--max-input-length", type=int, default=cfg.eval_max_input_length)
+    parser.add_argument("--max-new-tokens", type=int, default=cfg.eval_max_new_tokens)
+    parser.add_argument("--max-document-chars", type=int, default=cfg.max_document_chars)
+    parser.add_argument("--max-total-document-chars", type=int, default=cfg.max_total_document_chars)
     return parser.parse_args()
 
 
 def main() -> None:
     args = parse_args()
+    if not ARBITRATION_CONFIG.eval_multilabel:
+        raise ValueError("EVAL_MULTILABEL must remain True for arbitration policy evaluation.")
+
     records = read_jsonl(args.data_path)
     if args.limit > 0:
         records = records[: args.limit]
@@ -53,8 +63,8 @@ def main() -> None:
     )
     model.eval()
 
-    predictions: list[str] = []
-    references: list[str] = []
+    predicted_sets: list[set[str]] = []
+    gold_sets: list[set[str]] = []
     rows: list[dict[str, object]] = []
     for record in tqdm(records, desc=f"Evaluating {args.data_path.name}"):
         prompt = build_arbitration_prompt(
@@ -77,24 +87,25 @@ def main() -> None:
         completion = tokenizer.decode(output[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True).strip()
         pred_letters = extract_response_letters(completion)
         gold_letters = extract_gold_letters(record.get("gold_answer"))
-        pred = sorted(pred_letters)[0] if pred_letters else "INVALID"
-        gold = sorted(gold_letters)[0] if gold_letters else "INVALID"
-        predictions.append(pred)
-        references.append(gold)
+        predicted_sets.append(pred_letters)
+        gold_sets.append(gold_letters)
         rows.append(
             {
                 "query_id": record.get("query_id"),
-                "prediction": pred,
-                "gold": gold,
-                "correct": bool(pred_letters & gold_letters),
+                "prediction": sorted(pred_letters),
+                "gold": sorted(gold_letters),
+                "correct": pred_letters == gold_letters,
                 "completion": completion,
             }
         )
 
     labels = ["A", "B", "C", "D"]
-    accuracy = accuracy_score(references, predictions)
-    macro_f1 = f1_score(references, predictions, labels=labels, average="macro", zero_division=0)
-    metrics = {"data_path": str(args.data_path), "n": len(records), "accuracy": accuracy, "macro_f1": macro_f1}
+    metrics = {
+        "data_path": str(args.data_path),
+        "n": len(records),
+        "classes": labels,
+        **compute_multilabel_metrics(predicted_sets, gold_sets, classes=labels),
+    }
     print(json.dumps(metrics, indent=2))
 
     if args.output_path:

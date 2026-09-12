@@ -8,6 +8,7 @@ accelerate launch --multi_gpu --num_processes 2 scripts/train_sft_arbitration.py
 from __future__ import annotations
 
 import argparse
+import inspect
 import math
 import os
 from pathlib import Path
@@ -21,37 +22,69 @@ from transformers.trainer_utils import get_last_checkpoint
 from trl import SFTConfig, SFTTrainer
 
 from src.arbitration_policy import read_jsonl
+from src.config import ARBITRATION_CONFIG
 
 
 def parse_args() -> argparse.Namespace:
+    cfg = ARBITRATION_CONFIG
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--model-name", default="Qwen/Qwen2.5-3B-Instruct")
-    parser.add_argument("--train-path", type=Path, default=Path("data/sft_execution_data.jsonl"))
-    parser.add_argument("--output-dir", type=Path, default=Path("models/sft_arbitration_policy"))
+    parser.add_argument("--model-name", default=cfg.model_name)
+    parser.add_argument("--train-path", type=Path, default=cfg.sft_train_path)
+    parser.add_argument("--val-path", type=Path, default=cfg.sft_val_path)
+    parser.add_argument("--output-dir", type=Path, default=cfg.sft_output_dir)
     parser.add_argument("--resume-from", type=str, default=None)
-    parser.add_argument("--max-length", type=int, default=2048)
-    parser.add_argument("--epochs", type=float, default=3.0)
-    parser.add_argument("--learning-rate", type=float, default=2e-5)
-    parser.add_argument("--per-device-train-batch-size", type=int, default=4)
-    parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
-    parser.add_argument("--save-steps", type=int, default=100)
-    parser.add_argument("--logging-steps", type=int, default=10)
-    parser.add_argument("--lora-r", type=int, default=16)
-    parser.add_argument("--lora-alpha", type=int, default=32)
-    parser.add_argument("--lora-dropout", type=float, default=0.05)
-    parser.add_argument("--target-modules", nargs="+", default=["q_proj", "k_proj", "v_proj", "o_proj"])
-    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--max-length", type=int, default=cfg.sft_max_seq_length)
+    parser.add_argument("--epochs", type=float, default=cfg.sft_num_epochs)
+    parser.add_argument("--learning-rate", type=float, default=cfg.sft_learning_rate)
+    parser.add_argument("--per-device-train-batch-size", type=int, default=cfg.sft_per_device_train_batch_size)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=cfg.sft_gradient_accumulation_steps)
+    parser.add_argument("--save-steps", type=int, default=cfg.sft_save_steps)
+    parser.add_argument("--logging-steps", type=int, default=cfg.sft_logging_steps)
+    parser.add_argument("--lora-r", type=int, default=cfg.lora_r)
+    parser.add_argument("--lora-alpha", type=int, default=cfg.lora_alpha)
+    parser.add_argument("--lora-dropout", type=float, default=cfg.lora_dropout)
+    parser.add_argument("--target-modules", nargs="+", default=cfg.lora_target_modules)
+    parser.add_argument("--seed", type=int, default=cfg.seed)
     parser.add_argument("--bf16", action="store_true")
     parser.add_argument("--fp16", action="store_true")
     return parser.parse_args()
+
+
+def _sft_eval_strategy_kwargs(save_steps: int) -> dict[str, object]:
+    """Adapte le nom de l'argument TRL selon la version installée."""
+
+    parameters = inspect.signature(SFTConfig).parameters
+    kwargs: dict[str, object] = {
+        "eval_steps": save_steps,
+        "load_best_model_at_end": True,
+        "metric_for_best_model": "eval_loss",
+        "greater_is_better": False,
+    }
+    if "eval_strategy" in parameters:
+        kwargs["eval_strategy"] = "steps"
+    else:
+        kwargs["evaluation_strategy"] = "steps"
+    return kwargs
 
 
 def main() -> None:
     args = parse_args()
     os.environ.setdefault("PYTORCH_ALLOC_CONF", "expandable_segments:True")
 
+    if args.val_path is None:
+        raise ValueError(
+            "SFT validation is mandatory. Provide --val-path or set SFT_VAL_PATH "
+            "before launching train_sft_arbitration.py."
+        )
+
     records = read_jsonl(args.train_path)
+    val_records = read_jsonl(args.val_path)
+    if not records or "messages" not in records[0]:
+        raise ValueError("SFT train data must contain conversational `messages` records.")
+    if not val_records or "messages" not in val_records[0]:
+        raise ValueError("SFT validation data must contain conversational `messages` records.")
     train_dataset = Dataset.from_list(records)
+    val_dataset = Dataset.from_list(val_records)
     tokenizer = AutoTokenizer.from_pretrained(args.model_name, trust_remote_code=True)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -103,6 +136,7 @@ def main() -> None:
         save_strategy="steps",
         save_steps=args.save_steps,
         save_total_limit=2,
+        **_sft_eval_strategy_kwargs(args.save_steps),
         report_to="none",
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
@@ -119,12 +153,14 @@ def main() -> None:
         processing_class=tokenizer,
         args=training_args,
         train_dataset=train_dataset,
+        eval_dataset=val_dataset,
         formatting_func=format_chat,
     )
 
     examples_per_step = args.per_device_train_batch_size * args.gradient_accumulation_steps
     steps_per_epoch = math.ceil(len(train_dataset) / examples_per_step)
     print(f"SFT examples: {len(train_dataset)}")
+    print(f"SFT validation examples: {len(val_dataset)}")
     print(f"Approx. steps/epoch/process: {steps_per_epoch}")
 
     resume_from = args.resume_from
