@@ -53,7 +53,7 @@ def parse_args() -> argparse.Namespace:
 def _sft_eval_strategy_kwargs(save_steps: int) -> dict[str, object]:
     """Adapte le nom de l'argument TRL selon la version installée."""
 
-    parameters = inspect.signature(SFTConfig).parameters
+    parameters = inspect.signature(SFTConfig.__init__).parameters
     kwargs: dict[str, object] = {
         "eval_steps": save_steps,
         "load_best_model_at_end": True,
@@ -62,8 +62,13 @@ def _sft_eval_strategy_kwargs(save_steps: int) -> dict[str, object]:
     }
     if "eval_strategy" in parameters:
         kwargs["eval_strategy"] = "steps"
-    else:
+    elif "evaluation_strategy" in parameters:
         kwargs["evaluation_strategy"] = "steps"
+    else:
+        raise RuntimeError(
+            "This TRL/Transformers version does not expose eval_strategy or "
+            "evaluation_strategy in SFTConfig; cannot enable mandatory SFT validation."
+        )
     return kwargs
 
 
