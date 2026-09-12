@@ -2,7 +2,10 @@ accelerate
 datasets
 faiss-cpu
 huggingface_hub
+bitsandbytes
+matplotlib
 pandas
+peft
 pillow<12
 pyserini
 scikit-learn
@@ -10,3 +13,4 @@ sentence-transformers
 torch
 tqdm
 transformers
+trl
