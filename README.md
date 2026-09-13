@@ -176,6 +176,50 @@ data/test.jsonl
 The notebook runner is available at
 [notebooks/run_sft_dataset_from_gitlab.ipynb](/home/beryl/Documents/M2-IMSP/master-thesis/ARC/notebooks/run_sft_dataset_from_gitlab.ipynb).
 
+## A100 GRPO Arbitration Baseline
+
+The GRPO baseline for the thesis is configured for a single NVIDIA A100 SXM
+80GB:
+
+```bash
+bash scripts/run_grpo_a100.sh
+```
+
+Effective configuration:
+
+```text
+model: Qwen/Qwen2.5-3B-Instruct
+quantization: 4-bit NF4, double quantization
+compute dtype: BF16
+LoRA: r=16, alpha=32, dropout=0.05
+LoRA target modules: q_proj,k_proj,v_proj,o_proj
+num_generations: 8
+max_prompt_length: 4096
+max_completion_length: 256
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 1e-6
+beta: 0.01
+optimizer: paged_adamw_8bit
+gradient checkpointing: enabled
+vLLM: disabled
+```
+
+GRPO prompt budgeting is token-aware and uses the same tokenizer chat template
+as training/evaluation. The system message, complete question with A/B/C/D
+options, and final JSON instruction are protected. Only retrieved document
+content can be shortened. If shortening document content is still insufficient,
+documents are removed deterministically from the end of the existing retrieval
+order. Completion length remains independent: prompt overflow never reduces
+`max_completion_length`. If the protected components alone exceed 4096 tokens,
+the example is rejected with a warning and recorded.
+
+Before training, the GRPO script computes prompt statistics over the actual
+dataset, including before/after token lengths, truncation and rejection rates,
+tokens removed, and documents removed. It writes
+`prompt_budget_diagnostics.json` and `training_config.json` in the output
+directory for reproducibility.
+
 ## Output Schema
 
 Each JSONL line is one scenario:

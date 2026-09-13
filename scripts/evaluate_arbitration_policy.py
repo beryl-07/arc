@@ -18,11 +18,12 @@ from tqdm import tqdm
 from transformers import AutoTokenizer, BitsAndBytesConfig
 
 from src.arbitration_policy import (
-    build_arbitration_prompt,
+    build_token_bounded_arbitration_prompt,
     compute_multilabel_metrics,
     extract_gold_letters,
     extract_response_letters,
     read_jsonl,
+    summarize_prompt_budget_results,
 )
 from src.config import ARBITRATION_CONFIG
 
@@ -38,6 +39,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-new-tokens", type=int, default=cfg.eval_max_new_tokens)
     parser.add_argument("--max-document-chars", type=int, default=cfg.max_document_chars)
     parser.add_argument("--max-total-document-chars", type=int, default=cfg.max_total_document_chars)
+    parser.add_argument("--bf16", action=argparse.BooleanOptionalAction, default=cfg.grpo_bf16)
     return parser.parse_args()
 
 
@@ -56,7 +58,7 @@ def main() -> None:
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,
         bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.float16,
+        bnb_4bit_compute_dtype=torch.bfloat16 if args.bf16 else torch.float16,
         bnb_4bit_use_double_quant=True,
     )
     model = AutoPeftModelForCausalLM.from_pretrained(
@@ -71,14 +73,18 @@ def main() -> None:
     predicted_sets: list[set[str]] = []
     gold_sets: list[set[str]] = []
     rows: list[dict[str, object]] = []
+    prompt_budget_results = []
     for record in tqdm(records, desc=f"Evaluating {args.data_path.name}"):
-        prompt = build_arbitration_prompt(
+        budget_result = build_token_bounded_arbitration_prompt(
             record,
-            max_document_chars=args.max_document_chars,
-            max_total_document_chars=args.max_total_document_chars,
+            tokenizer=tokenizer,
+            max_prompt_length=args.max_input_length,
+            add_generation_prompt=True,
         )
-        text = tokenizer.apply_chat_template(prompt, tokenize=False, add_generation_prompt=True)
-        inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=args.max_input_length)
+        prompt_budget_results.append(budget_result)
+        if budget_result.was_rejected:
+            continue
+        inputs = tokenizer(budget_result.chat_text, return_tensors="pt", truncation=False)
         device = next(model.parameters()).device
         inputs = {key: value.to(device) for key, value in inputs.items()}
         with torch.no_grad():
@@ -101,14 +107,19 @@ def main() -> None:
                 "gold": sorted(gold_letters),
                 "correct": pred_letters == gold_letters,
                 "completion": completion,
+                "prompt_token_count": budget_result.final_token_count,
+                "prompt_original_token_count": budget_result.original_token_count,
+                "documents_removed": budget_result.documents_removed,
             }
         )
 
     labels = ["A", "B", "C", "D"]
     metrics = {
         "data_path": str(args.data_path),
-        "n": len(records),
+        "n": len(gold_sets),
+        "n_input_records": len(records),
         "classes": labels,
+        "prompt_budget": summarize_prompt_budget_results(prompt_budget_results, args.max_input_length),
         **compute_multilabel_metrics(predicted_sets, gold_sets, classes=labels),
     }
     print(json.dumps(metrics, indent=2))

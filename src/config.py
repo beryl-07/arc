@@ -130,6 +130,40 @@ CONFIG = load_config()
 
 
 @dataclass(frozen=True)
+class GRPOHardwareProfile:
+    """Named GRPO profile used to make hardware assumptions explicit."""
+
+    name: str
+    num_generations: int
+    max_prompt_length: int
+    max_completion_length: int
+    per_device_train_batch_size: int
+    gradient_accumulation_steps: int
+    learning_rate: float
+    beta: float
+    bf16: bool
+    fp16: bool
+    gradient_checkpointing: bool
+    optimizer: str
+
+
+A100_GRPO_PROFILE = GRPOHardwareProfile(
+    name="a100_80gb_single_gpu",
+    num_generations=8,
+    max_prompt_length=4096,
+    max_completion_length=256,
+    per_device_train_batch_size=1,
+    gradient_accumulation_steps=8,
+    learning_rate=1e-6,
+    beta=0.01,
+    bf16=True,
+    fp16=False,
+    gradient_checkpointing=True,
+    optimizer="paged_adamw_8bit",
+)
+
+
+@dataclass(frozen=True)
 class ArbitrationTrainingConfig:
     """Configuration centrale du pipeline SFT / GRPO / évaluation."""
 
@@ -156,25 +190,38 @@ class ArbitrationTrainingConfig:
     # =========================
     # Configuration GRPO
     # =========================
-    grpo_num_generations: int = int(os.getenv("GRPO_NUM_GENERATIONS", "8"))
+    grpo_profile: GRPOHardwareProfile = A100_GRPO_PROFILE
+    grpo_num_generations: int = int(os.getenv("GRPO_NUM_GENERATIONS", str(A100_GRPO_PROFILE.num_generations)))
     # 50 est un point de départ expérimental, pas une valeur optimale. Si le
     # coût calcul le permet, comparer ensuite avec 80 steps.
     grpo_max_steps: int = int(os.getenv("GRPO_MAX_STEPS", "50"))
-    grpo_learning_rate: float = float(os.getenv("GRPO_LEARNING_RATE", "1e-6"))
+    grpo_learning_rate: float = float(os.getenv("GRPO_LEARNING_RATE", str(A100_GRPO_PROFILE.learning_rate)))
     grpo_lr_scheduler_type: str = os.getenv("GRPO_LR_SCHEDULER_TYPE", "constant_with_warmup")
     grpo_warmup_ratio: float = float(os.getenv("GRPO_WARMUP_RATIO", "0.03"))
-    grpo_beta: float = float(os.getenv("GRPO_BETA", "0.01"))
-    grpo_max_prompt_length: int = int(os.getenv("GRPO_MAX_PROMPT_LENGTH", "1024"))
-    grpo_max_completion_length: int = int(os.getenv("GRPO_MAX_COMPLETION_LENGTH", "128"))
-    grpo_per_device_batch_size: int = int(os.getenv("GRPO_PER_DEVICE_BATCH_SIZE", "1"))
-    grpo_gradient_accumulation_steps: int = int(os.getenv("GRPO_GRADIENT_ACCUMULATION_STEPS", "8"))
+    grpo_beta: float = float(os.getenv("GRPO_BETA", str(A100_GRPO_PROFILE.beta)))
+    grpo_max_prompt_length: int = int(os.getenv("GRPO_MAX_PROMPT_LENGTH", str(A100_GRPO_PROFILE.max_prompt_length)))
+    grpo_max_completion_length: int = int(os.getenv("GRPO_MAX_COMPLETION_LENGTH", str(A100_GRPO_PROFILE.max_completion_length)))
+    grpo_per_device_batch_size: int = int(
+        os.getenv("GRPO_PER_DEVICE_BATCH_SIZE", str(A100_GRPO_PROFILE.per_device_train_batch_size))
+    )
+    grpo_gradient_accumulation_steps: int = int(
+        os.getenv("GRPO_GRADIENT_ACCUMULATION_STEPS", str(A100_GRPO_PROFILE.gradient_accumulation_steps))
+    )
     grpo_save_steps: int = int(os.getenv("GRPO_SAVE_STEPS", "50"))
     grpo_logging_steps: int = int(os.getenv("GRPO_LOGGING_STEPS", "5"))
+    grpo_bf16: bool = _bool_env("GRPO_BF16", A100_GRPO_PROFILE.bf16)
+    grpo_fp16: bool = _bool_env("GRPO_FP16", A100_GRPO_PROFILE.fp16)
+    grpo_gradient_checkpointing: bool = _bool_env(
+        "GRPO_GRADIENT_CHECKPOINTING", A100_GRPO_PROFILE.gradient_checkpointing
+    )
+    grpo_optimizer: str = os.getenv("GRPO_OPTIMIZER", A100_GRPO_PROFILE.optimizer)
     # Profil optionnel pour exécuter GRPO sur des GPU 16 Go type T4.
+    grpo_small_gpu_vram_gib: float = float(os.getenv("GRPO_SMALL_GPU_VRAM_GIB", "24"))
     grpo_memory_safe_max_steps: int = int(os.getenv("GRPO_MEMORY_SAFE_MAX_STEPS", "200"))
     grpo_memory_safe_num_generations: int = int(os.getenv("GRPO_MEMORY_SAFE_NUM_GENERATIONS", "2"))
     grpo_memory_safe_max_prompt_length: int = int(os.getenv("GRPO_MEMORY_SAFE_MAX_PROMPT_LENGTH", "384"))
     grpo_memory_safe_max_completion_length: int = int(os.getenv("GRPO_MEMORY_SAFE_MAX_COMPLETION_LENGTH", "96"))
+    grpo_memory_safe_optimizer: str = os.getenv("GRPO_MEMORY_SAFE_OPTIMIZER", "paged_adamw_8bit")
 
     # =========================
     # Évaluation
@@ -189,10 +236,10 @@ class ArbitrationTrainingConfig:
     sft_output_dir: Path = Path(os.getenv("SFT_OUTPUT_DIR", "models/sft_arbitration_policy"))
     grpo_output_dir: Path = Path(os.getenv("GRPO_OUTPUT_DIR", "models/grpo_arbitration_policy"))
     outputs_dir: Path = Path(os.getenv("ARBITRATION_OUTPUTS_DIR", "outputs"))
-    eval_max_input_length: int = int(os.getenv("EVAL_MAX_INPUT_LENGTH", "2048"))
+    eval_max_input_length: int = int(os.getenv("EVAL_MAX_INPUT_LENGTH", str(A100_GRPO_PROFILE.max_prompt_length)))
     eval_max_new_tokens: int = int(os.getenv("EVAL_MAX_NEW_TOKENS", "128"))
-    max_document_chars: int = int(os.getenv("ARBITRATION_MAX_DOCUMENT_CHARS", "600"))
-    max_total_document_chars: int = int(os.getenv("ARBITRATION_MAX_TOTAL_DOCUMENT_CHARS", "3000"))
+    max_document_chars: int = int(os.getenv("ARBITRATION_MAX_DOCUMENT_CHARS", "0"))
+    max_total_document_chars: int = int(os.getenv("ARBITRATION_MAX_TOTAL_DOCUMENT_CHARS", "0"))
     seed: int = int(os.getenv("ARBITRATION_SEED", "42"))
 
 
@@ -211,6 +258,8 @@ def resolve_grpo_per_device_batch_size(
 
     generations = num_generations or config.grpo_num_generations
     batch_size = config.grpo_per_device_batch_size
+    if batch_size == 1:
+        return batch_size
     while (num_processes * batch_size) % generations != 0:
         batch_size += 1
     return batch_size
@@ -233,6 +282,11 @@ GRPO_MAX_PROMPT_LENGTH = ARBITRATION_CONFIG.grpo_max_prompt_length
 GRPO_MAX_COMPLETION_LENGTH = ARBITRATION_CONFIG.grpo_max_completion_length
 GRPO_PER_DEVICE_BATCH_SIZE = ARBITRATION_CONFIG.grpo_per_device_batch_size
 GRPO_GRADIENT_ACCUMULATION_STEPS = ARBITRATION_CONFIG.grpo_gradient_accumulation_steps
+GRPO_BF16 = ARBITRATION_CONFIG.grpo_bf16
+GRPO_FP16 = ARBITRATION_CONFIG.grpo_fp16
+GRPO_GRADIENT_CHECKPOINTING = ARBITRATION_CONFIG.grpo_gradient_checkpointing
+GRPO_OPTIMIZER = ARBITRATION_CONFIG.grpo_optimizer
+GRPO_SMALL_GPU_VRAM_GIB = ARBITRATION_CONFIG.grpo_small_gpu_vram_gib
 GRPO_MEMORY_SAFE_MAX_STEPS = ARBITRATION_CONFIG.grpo_memory_safe_max_steps
 GRPO_MEMORY_SAFE_NUM_GENERATIONS = ARBITRATION_CONFIG.grpo_memory_safe_num_generations
 GRPO_MEMORY_SAFE_MAX_PROMPT_LENGTH = ARBITRATION_CONFIG.grpo_memory_safe_max_prompt_length
@@ -277,6 +331,11 @@ config = {
     "GRPO_MAX_COMPLETION_LENGTH": GRPO_MAX_COMPLETION_LENGTH,
     "GRPO_PER_DEVICE_BATCH_SIZE": GRPO_PER_DEVICE_BATCH_SIZE,
     "GRPO_GRADIENT_ACCUMULATION_STEPS": GRPO_GRADIENT_ACCUMULATION_STEPS,
+    "GRPO_BF16": GRPO_BF16,
+    "GRPO_FP16": GRPO_FP16,
+    "GRPO_GRADIENT_CHECKPOINTING": GRPO_GRADIENT_CHECKPOINTING,
+    "GRPO_OPTIMIZER": GRPO_OPTIMIZER,
+    "GRPO_SMALL_GPU_VRAM_GIB": GRPO_SMALL_GPU_VRAM_GIB,
     "GRPO_MEMORY_SAFE_MAX_STEPS": GRPO_MEMORY_SAFE_MAX_STEPS,
     "GRPO_MEMORY_SAFE_NUM_GENERATIONS": GRPO_MEMORY_SAFE_NUM_GENERATIONS,
     "GRPO_MEMORY_SAFE_MAX_PROMPT_LENGTH": GRPO_MEMORY_SAFE_MAX_PROMPT_LENGTH,
