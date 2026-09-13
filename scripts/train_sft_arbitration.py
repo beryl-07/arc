@@ -18,6 +18,14 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+# Contournement d'un bug de compatibilité entre PEFT et Transformers : certaines
+# versions de PEFT importent EmbeddingParallel au rechargement du meilleur
+# adapter, alors que cette classe peut être absente côté Transformers. Le
+# sharding tensor-parallel n'est pas utilisé ici.
+import peft.utils.save_and_load as _peft_save_load
+
+_peft_save_load._maybe_shard_state_dict_for_tp = lambda *args, **kwargs: None
+
 import torch
 from accelerate import PartialState
 from datasets import Dataset
