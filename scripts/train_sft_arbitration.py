@@ -28,6 +28,7 @@ from trl import SFTConfig, SFTTrainer
 
 from src.arbitration_policy import read_jsonl
 from src.config import ARBITRATION_CONFIG
+from src.training_progress import ProgressTimeCallback
 
 
 def parse_args() -> argparse.Namespace:
@@ -194,6 +195,8 @@ def main() -> None:
         "fp16": args.fp16,
         "bf16": args.bf16,
         "logging_steps": args.logging_steps,
+        "logging_strategy": "steps",
+        "disable_tqdm": False,
         "save_strategy": "steps",
         "save_steps": args.save_steps,
         "save_total_limit": 2,
@@ -218,12 +221,16 @@ def main() -> None:
         val_dataset=val_dataset,
         formatting_func=format_chat,
     )
+    trainer.add_callback(ProgressTimeCallback("SFT"))
 
-    examples_per_step = args.per_device_train_batch_size * args.gradient_accumulation_steps
+    state = PartialState()
+    examples_per_step = args.per_device_train_batch_size * args.gradient_accumulation_steps * state.num_processes
     steps_per_epoch = math.ceil(len(train_dataset) / examples_per_step)
     print(f"SFT examples: {len(train_dataset)}")
     print(f"SFT validation examples: {len(val_dataset)}")
-    print(f"Approx. steps/epoch/process: {steps_per_epoch}")
+    print(f"SFT effective global batch size: {examples_per_step}")
+    print(f"SFT approx. steps/epoch: {steps_per_epoch}")
+    print(f"SFT approx. total steps: {math.ceil(steps_per_epoch * args.epochs)}", flush=True)
 
     resume_from = args.resume_from
     if resume_from is None and args.output_dir.exists():

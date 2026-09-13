@@ -21,6 +21,7 @@ from trl import GRPOConfig, GRPOTrainer
 
 from src.arbitration_policy import build_arbitration_prompt, exact_letter_reward, read_jsonl
 from src.config import ARBITRATION_CONFIG
+from src.training_progress import ProgressTimeCallback
 
 
 def parse_args() -> argparse.Namespace:
@@ -73,7 +74,7 @@ def main() -> None:
             for record in records
         ]
     )
-    print(f"GRPO train examples: {len(dataset)}")
+    print(f"GRPO train examples: {len(dataset)}", flush=True)
 
     tokenizer = AutoTokenizer.from_pretrained(args.sft_model_path, trust_remote_code=True)
     if tokenizer.pad_token is None:
@@ -104,10 +105,12 @@ def main() -> None:
         max_steps=args.max_steps,
         per_device_train_batch_size=args.per_device_train_batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
+        logging_strategy="steps",
         logging_steps=args.logging_steps,
         save_steps=args.save_steps,
         optim="paged_adamw_8bit",
         gradient_checkpointing=True,
+        disable_tqdm=False,
         report_to="none",
         fp16=args.fp16,
         bf16=args.bf16,
@@ -120,6 +123,10 @@ def main() -> None:
         reward_funcs=exact_letter_reward,
         processing_class=tokenizer,
     )
+    trainer.add_callback(ProgressTimeCallback("GRPO"))
+    print(f"GRPO total steps: {args.max_steps}", flush=True)
+    print(f"GRPO effective global prompt batch size: {global_batch_size}", flush=True)
+    print(f"GRPO gradient accumulation steps: {args.gradient_accumulation_steps}", flush=True)
     trainer.train()
     trainer.save_model(str(args.output_dir))
     tokenizer.save_pretrained(str(args.output_dir))
