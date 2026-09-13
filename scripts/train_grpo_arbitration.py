@@ -45,6 +45,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--num-generations", type=int, default=cfg.grpo_num_generations)
     parser.add_argument("--beta", type=float, default=cfg.grpo_beta)
     parser.add_argument("--learning-rate", type=float, default=cfg.grpo_learning_rate)
+    parser.add_argument("--lr-scheduler-type", type=str, default=cfg.grpo_lr_scheduler_type)
+    parser.add_argument("--warmup-ratio", type=float, default=cfg.grpo_warmup_ratio)
     parser.add_argument("--max-steps", type=int, default=cfg.grpo_max_steps)
     parser.add_argument("--max-prompt-length", type=int, default=cfg.grpo_max_prompt_length)
     parser.add_argument("--max-completion-length", type=int, default=cfg.grpo_max_completion_length)
@@ -120,10 +122,12 @@ def _apply_small_gpu_overrides(args: argparse.Namespace, state: PartialState) ->
     cfg = ARBITRATION_CONFIG
     before = {
         "num_generations": args.num_generations,
+        "max_steps": args.max_steps,
         "max_prompt_length": args.max_prompt_length,
         "max_completion_length": args.max_completion_length,
         "per_device_train_batch_size": args.per_device_train_batch_size,
     }
+    args.max_steps = max(args.max_steps, cfg.grpo_memory_safe_max_steps)
     args.num_generations = min(args.num_generations, max(2, cfg.grpo_memory_safe_num_generations))
     args.max_prompt_length = min(args.max_prompt_length, cfg.grpo_memory_safe_max_prompt_length)
     args.max_completion_length = min(args.max_completion_length, cfg.grpo_memory_safe_max_completion_length)
@@ -132,6 +136,7 @@ def _apply_small_gpu_overrides(args: argparse.Namespace, state: PartialState) ->
     if state.is_local_main_process:
         after = {
             "num_generations": args.num_generations,
+            "max_steps": args.max_steps,
             "max_prompt_length": args.max_prompt_length,
             "max_completion_length": args.max_completion_length,
             "per_device_train_batch_size": args.per_device_train_batch_size,
@@ -156,6 +161,10 @@ def main() -> None:
         print(f"GRPO per-device batch size: {args.per_device_train_batch_size}", flush=True)
         print(f"GRPO global prompt batch size: {global_batch_size}", flush=True)
         print(f"GRPO num_generations: {args.num_generations}", flush=True)
+        print(f"GRPO max_prompt_length: {args.max_prompt_length}", flush=True)
+        print(f"GRPO max_completion_length: {args.max_completion_length}", flush=True)
+        print(f"GRPO lr_scheduler_type: {args.lr_scheduler_type}", flush=True)
+        print(f"GRPO warmup_ratio: {args.warmup_ratio}", flush=True)
     if global_batch_size % args.num_generations != 0:
         raise ValueError(
             "Invalid GRPO batch configuration: "
@@ -208,6 +217,8 @@ def main() -> None:
         "num_generations": args.num_generations,
         "beta": args.beta,
         "learning_rate": args.learning_rate,
+        "lr_scheduler_type": args.lr_scheduler_type,
+        "warmup_ratio": args.warmup_ratio,
         "max_prompt_length": args.max_prompt_length,
         "max_completion_length": args.max_completion_length,
         "max_steps": args.max_steps,

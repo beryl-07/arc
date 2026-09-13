@@ -161,6 +161,8 @@ class ArbitrationTrainingConfig:
     # coût calcul le permet, comparer ensuite avec 80 steps.
     grpo_max_steps: int = int(os.getenv("GRPO_MAX_STEPS", "50"))
     grpo_learning_rate: float = float(os.getenv("GRPO_LEARNING_RATE", "1e-6"))
+    grpo_lr_scheduler_type: str = os.getenv("GRPO_LR_SCHEDULER_TYPE", "constant_with_warmup")
+    grpo_warmup_ratio: float = float(os.getenv("GRPO_WARMUP_RATIO", "0.03"))
     grpo_beta: float = float(os.getenv("GRPO_BETA", "0.01"))
     grpo_max_prompt_length: int = int(os.getenv("GRPO_MAX_PROMPT_LENGTH", "1024"))
     grpo_max_completion_length: int = int(os.getenv("GRPO_MAX_COMPLETION_LENGTH", "128"))
@@ -169,9 +171,10 @@ class ArbitrationTrainingConfig:
     grpo_save_steps: int = int(os.getenv("GRPO_SAVE_STEPS", "50"))
     grpo_logging_steps: int = int(os.getenv("GRPO_LOGGING_STEPS", "5"))
     # Profil optionnel pour exécuter GRPO sur des GPU 16 Go type T4.
+    grpo_memory_safe_max_steps: int = int(os.getenv("GRPO_MEMORY_SAFE_MAX_STEPS", "200"))
     grpo_memory_safe_num_generations: int = int(os.getenv("GRPO_MEMORY_SAFE_NUM_GENERATIONS", "2"))
-    grpo_memory_safe_max_prompt_length: int = int(os.getenv("GRPO_MEMORY_SAFE_MAX_PROMPT_LENGTH", "512"))
-    grpo_memory_safe_max_completion_length: int = int(os.getenv("GRPO_MEMORY_SAFE_MAX_COMPLETION_LENGTH", "64"))
+    grpo_memory_safe_max_prompt_length: int = int(os.getenv("GRPO_MEMORY_SAFE_MAX_PROMPT_LENGTH", "384"))
+    grpo_memory_safe_max_completion_length: int = int(os.getenv("GRPO_MEMORY_SAFE_MAX_COMPLETION_LENGTH", "96"))
 
     # =========================
     # Évaluation
@@ -223,11 +226,14 @@ SFT_VAL_PATH = ARBITRATION_CONFIG.sft_val_path
 GRPO_NUM_GENERATIONS = ARBITRATION_CONFIG.grpo_num_generations
 GRPO_MAX_STEPS = ARBITRATION_CONFIG.grpo_max_steps
 GRPO_LEARNING_RATE = ARBITRATION_CONFIG.grpo_learning_rate
+GRPO_LR_SCHEDULER_TYPE = ARBITRATION_CONFIG.grpo_lr_scheduler_type
+GRPO_WARMUP_RATIO = ARBITRATION_CONFIG.grpo_warmup_ratio
 GRPO_BETA = ARBITRATION_CONFIG.grpo_beta
 GRPO_MAX_PROMPT_LENGTH = ARBITRATION_CONFIG.grpo_max_prompt_length
 GRPO_MAX_COMPLETION_LENGTH = ARBITRATION_CONFIG.grpo_max_completion_length
 GRPO_PER_DEVICE_BATCH_SIZE = ARBITRATION_CONFIG.grpo_per_device_batch_size
 GRPO_GRADIENT_ACCUMULATION_STEPS = ARBITRATION_CONFIG.grpo_gradient_accumulation_steps
+GRPO_MEMORY_SAFE_MAX_STEPS = ARBITRATION_CONFIG.grpo_memory_safe_max_steps
 GRPO_MEMORY_SAFE_NUM_GENERATIONS = ARBITRATION_CONFIG.grpo_memory_safe_num_generations
 GRPO_MEMORY_SAFE_MAX_PROMPT_LENGTH = ARBITRATION_CONFIG.grpo_memory_safe_max_prompt_length
 GRPO_MEMORY_SAFE_MAX_COMPLETION_LENGTH = ARBITRATION_CONFIG.grpo_memory_safe_max_completion_length
@@ -264,11 +270,14 @@ config = {
     "GRPO_NUM_GENERATIONS": GRPO_NUM_GENERATIONS,
     "GRPO_MAX_STEPS": GRPO_MAX_STEPS,
     "GRPO_LEARNING_RATE": GRPO_LEARNING_RATE,
+    "GRPO_LR_SCHEDULER_TYPE": GRPO_LR_SCHEDULER_TYPE,
+    "GRPO_WARMUP_RATIO": GRPO_WARMUP_RATIO,
     "GRPO_BETA": GRPO_BETA,
     "GRPO_MAX_PROMPT_LENGTH": GRPO_MAX_PROMPT_LENGTH,
     "GRPO_MAX_COMPLETION_LENGTH": GRPO_MAX_COMPLETION_LENGTH,
     "GRPO_PER_DEVICE_BATCH_SIZE": GRPO_PER_DEVICE_BATCH_SIZE,
     "GRPO_GRADIENT_ACCUMULATION_STEPS": GRPO_GRADIENT_ACCUMULATION_STEPS,
+    "GRPO_MEMORY_SAFE_MAX_STEPS": GRPO_MEMORY_SAFE_MAX_STEPS,
     "GRPO_MEMORY_SAFE_NUM_GENERATIONS": GRPO_MEMORY_SAFE_NUM_GENERATIONS,
     "GRPO_MEMORY_SAFE_MAX_PROMPT_LENGTH": GRPO_MEMORY_SAFE_MAX_PROMPT_LENGTH,
     "GRPO_MEMORY_SAFE_MAX_COMPLETION_LENGTH": GRPO_MEMORY_SAFE_MAX_COMPLETION_LENGTH,
