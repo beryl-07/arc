@@ -190,6 +190,22 @@ class ArbitrationTrainingConfig:
 
 ARBITRATION_CONFIG = ArbitrationTrainingConfig()
 
+
+def resolve_grpo_per_device_batch_size(
+    num_processes: int,
+    config: ArbitrationTrainingConfig = ARBITRATION_CONFIG,
+) -> int:
+    """Retourne un batch GRPO compatible avec num_generations pour Accelerate."""
+
+    if num_processes <= 0:
+        raise ValueError("num_processes must be positive")
+
+    batch_size = config.grpo_per_device_batch_size
+    while (num_processes * batch_size) % config.grpo_num_generations != 0:
+        batch_size += 1
+    return batch_size
+
+
 # Aliases explicites demandés par le cahier des charges. Ils pointent tous vers
 # la configuration centrale ci-dessus pour éviter les divergences.
 SFT_NUM_EPOCHS = ARBITRATION_CONFIG.sft_num_epochs
